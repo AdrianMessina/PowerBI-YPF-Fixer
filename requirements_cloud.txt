@@ -1,0 +1,8 @@
+# Power BI Fixer — Cloud (CML) dependencies
+# Includes base requirements + cloud-specific
+
+-r requirements.txt
+
+# No extra dependencies needed:
+# - SQLite is included with Python (for logging)
+# - All parsers/fixers use standard library

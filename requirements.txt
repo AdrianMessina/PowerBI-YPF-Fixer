@@ -1,0 +1,17 @@
+# Power BI Analyzer 2.0 - Dependencies
+
+# Core
+pyyaml>=6.0.1
+
+# Streamlit UI
+streamlit>=1.35.0
+
+# Data processing
+pandas>=2.2.0
+numpy<2.0  # Pin to <2.0 for compatibility with plotly/xarray dependencies
+
+# Visualization
+plotly>=5.22.0
+
+# Optional: Usage tracking (if integrating with existing tracker)
+# Add your usage_tracker module if needed

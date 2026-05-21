@@ -1,0 +1,184 @@
+"""TMDL file parser - converts TMDL to BIM-compatible dict."""
+
+import os
+import re
+
+
+class TMDLParser:
+    """Parses TMDL (Tabular Model Definition Language) files."""
+
+    def __init__(self, definition_path: str):
+        self.definition_path = definition_path
+        self.model = {"tables": [], "relationships": []}
+
+    def parse(self) -> dict:
+        """Parse all TMDL files and return BIM-compatible model dict."""
+        self._parse_tables()
+        self._parse_relationships()
+        return {"model": self.model}
+
+    def _parse_tables(self):
+        tables_dir = os.path.join(self.definition_path, "tables")
+        if not os.path.isdir(tables_dir):
+            return
+
+        for fname in os.listdir(tables_dir):
+            if not fname.endswith(".tmdl"):
+                continue
+            fpath = os.path.join(tables_dir, fname)
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    content = f.read()
+                table = self._parse_table_file(content)
+                if table:
+                    self.model["tables"].append(table)
+            except Exception:
+                continue
+
+    def _parse_table_file(self, content: str) -> dict | None:
+        lines = content.split("\n")
+        if not lines:
+            return None
+
+        # Extract table name
+        table_name = None
+        for line in lines:
+            m = re.match(r"^table\s+'([^']+)'", line.strip())
+            if not m:
+                m = re.match(r'^table\s+"([^"]+)"', line.strip())
+            if not m:
+                m = re.match(r"^table\s+(\S+)", line.strip())
+            if m:
+                table_name = m.group(1)
+                break
+
+        if not table_name:
+            return None
+
+        table = {
+            "name": table_name,
+            "columns": [],
+            "measures": [],
+            "partitions": [],
+            "isCalculatedTable": False,
+            "isHidden": False,
+        }
+
+        # Check if hidden
+        if re.search(r"^\s+isHidden\s*$", content, re.MULTILINE):
+            table["isHidden"] = True
+
+        # Extract columns
+        col_pattern = re.compile(
+            r"^\tcolumn\s+'([^']+)'(?:\s*$|\s)", re.MULTILINE
+        )
+        col_blocks = re.split(r"(?=^\tcolumn\s+')", content, flags=re.MULTILINE)
+        for block in col_blocks:
+            cm = re.match(r"^\tcolumn\s+'([^']+)'", block)
+            if not cm:
+                continue
+            col = {
+                "name": cm.group(1),
+                "dataType": "string",
+                "isHidden": False,
+                "type": "data",
+                "summarizeBy": "none",
+            }
+            # Data type
+            dt = re.search(r"dataType:\s*(\w+)", block)
+            if dt:
+                col["dataType"] = dt.group(1)
+            # Hidden
+            if re.search(r"^\s+isHidden\s*$", block, re.MULTILINE):
+                col["isHidden"] = True
+            # Calculated column (has expression with =)
+            expr = re.search(r"expression\s*(?:=|:)\s*(.+?)(?:\n\t\w|\Z)", block, re.DOTALL)
+            if expr:
+                col["type"] = "calculated"
+                col["expression"] = expr.group(1).strip()
+            # SummarizeBy
+            sb = re.search(r"summarizeBy:\s*(\w+)", block)
+            if sb:
+                col["summarizeBy"] = sb.group(1)
+            # Format
+            fs = re.search(r"formatString:\s*(.+)", block)
+            if fs:
+                col["formatString"] = fs.group(1).strip()
+
+            table["columns"].append(col)
+
+        # Extract measures
+        measure_blocks = re.split(r"(?=^\tmeasure\s+')", content, flags=re.MULTILINE)
+        for block in measure_blocks:
+            mm = re.match(r"^\tmeasure\s+'([^']+)'\s*=\s*(.*?)(?=\n\tmeasure\s+'|\n\tcolumn\s+'|\n\tpartition\s+'|\n\tannotation\s|\Z)", block, re.DOTALL)
+            if not mm:
+                mm = re.match(r"^\tmeasure\s+'([^']+)'\s*=\s*(.*)", block, re.DOTALL)
+            if not mm:
+                continue
+            measure = {
+                "name": mm.group(1),
+                "expression": mm.group(2).strip(),
+                "description": "",
+                "formatString": "",
+            }
+            desc = re.search(r"description:\s*(.+)", block)
+            if desc:
+                measure["description"] = desc.group(1).strip()
+            fs = re.search(r"formatString:\s*(.+)", block)
+            if fs:
+                measure["formatString"] = fs.group(1).strip()
+            table["measures"].append(measure)
+
+        # Check for calculated table
+        partition_blocks = re.split(r"(?=^\tpartition\s+')", content, flags=re.MULTILINE)
+        for block in partition_blocks:
+            if "mode: import" not in block.lower() and re.search(r"expression\s*(?:=|:)", block):
+                if re.search(r"source\s*=\s*calculated", block, re.IGNORECASE):
+                    table["isCalculatedTable"] = True
+
+        return table
+
+    def _parse_relationships(self):
+        rel_file = os.path.join(self.definition_path, "relationships.tmdl")
+        if not os.path.isfile(rel_file):
+            return
+
+        try:
+            with open(rel_file, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception:
+            return
+
+        blocks = content.split("\nrelationship")
+        for block in blocks:
+            from_match = re.search(r"fromColumn:\s*'?([^'\n]+)'?\.([^'\n]+)'?\s*$", block, re.MULTILINE)
+            to_match = re.search(r"toColumn:\s*'?([^'\n]+)'?\.([^'\n]+)'?\s*$", block, re.MULTILINE)
+
+            if not from_match or not to_match:
+                from_col = re.search(r"fromColumn:\s*(.+)", block)
+                to_col = re.search(r"toColumn:\s*(.+)", block)
+                if not from_col or not to_col:
+                    continue
+                # Try table.column format
+                fp = from_col.group(1).strip().replace("'", "")
+                tp = to_col.group(1).strip().replace("'", "")
+                if "." in fp and "." in tp:
+                    from_parts = fp.rsplit(".", 1)
+                    to_parts = tp.rsplit(".", 1)
+                else:
+                    continue
+            else:
+                from_parts = [from_match.group(1).strip("' "), from_match.group(2).strip("' ")]
+                to_parts = [to_match.group(1).strip("' "), to_match.group(2).strip("' ")]
+
+            is_bidi = "bothDirections" in block or "crossFilteringBehavior: bothDirections" in block
+            is_active = "isActive: false" not in block.lower()
+
+            self.model["relationships"].append({
+                "fromTable": from_parts[0],
+                "fromColumn": from_parts[1],
+                "toTable": to_parts[0],
+                "toColumn": to_parts[1],
+                "crossFilteringBehavior": "bothDirections" if is_bidi else "oneDirection",
+                "isActive": is_active,
+            })
