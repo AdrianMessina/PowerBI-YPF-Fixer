@@ -171,8 +171,15 @@ class BaseFixer(ABC):
                     if data:
                         yield page_path, data, page_name
 
-    def _iter_tmdl_table_files(self):
-        """Iterate over all .tmdl table files."""
+    def _iter_tmdl_table_files(self, include_system: bool = False):
+        """Iterate over all .tmdl table files.
+
+        Args:
+            include_system: Si False (default), excluye tablas automáticas de Power BI
+                            (LocalDateTable_*, DateTableTemplate_*, isHidden+isPrivate).
+                            Establecer True solo para casos donde necesites ver TODAS las tablas
+                            (ej: el fixer de Auto Date/Time que las busca específicamente).
+        """
         model_def = self._get_model_definition_path()
         tables_dir = os.path.join(model_def, "tables")
         if not os.path.isdir(tables_dir):
@@ -186,7 +193,50 @@ class BaseFixer(ABC):
                 content = f.read()
             m = re.match(r"^table\s+'([^']+)'", content)
             tname = m.group(1) if m else fname.replace(".tmdl", "")
+
+            # Filtrar tablas automáticas si no se pidieron explícitamente
+            if not include_system and self._is_system_table_tmdl(tname, content):
+                continue
+
             yield fpath, content, tname
+
+    @staticmethod
+    def _is_system_table_tmdl(table_name: str, content: str) -> bool:
+        """Detecta si una tabla en TMDL es automática de Power BI (no del usuario)."""
+        if table_name.startswith("LocalDateTable_"):
+            return True
+        if table_name.startswith("DateTableTemplate_"):
+            return True
+        if "__PBI_TemplateDateTable" in content:
+            return True
+        return False
+
+    @staticmethod
+    def _is_system_table_dict(table: dict) -> bool:
+        """Detecta si una tabla (dict del modelo) es automática de Power BI."""
+        if table.get("isSystemTable", False):
+            return True
+        tname = table.get("name", "")
+        if tname.startswith("LocalDateTable_") or tname.startswith("DateTableTemplate_"):
+            return True
+        ttype = table.get("tableType", "")
+        if ttype in ("auto_datetime_local", "auto_datetime_template", "system_hidden"):
+            return True
+        return False
+
+    def _iter_user_tables(self, model_data: dict):
+        """Itera SOLO sobre tablas del usuario (excluye Auto Date/Time y system_hidden).
+
+        Args:
+            model_data: dict del modelo (model_data.get("tables", []) será iterado)
+
+        Yields:
+            cada tabla que NO es del sistema
+        """
+        for table in model_data.get("tables", []):
+            if self._is_system_table_dict(table):
+                continue
+            yield table
 
 
 class FixerEngine:

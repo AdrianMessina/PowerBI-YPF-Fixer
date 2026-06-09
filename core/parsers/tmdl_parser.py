@@ -62,11 +62,27 @@ class TMDLParser:
             "partitions": [],
             "isCalculatedTable": False,
             "isHidden": False,
+            "isPrivate": False,
+            "tableType": "user",
+            "isSystemTable": False,
         }
 
         # Check if hidden
         if re.search(r"^\s+isHidden\s*$", content, re.MULTILINE):
             table["isHidden"] = True
+
+        # Check if private (sistema)
+        if re.search(r"^\s+isPrivate\s*$", content, re.MULTILINE):
+            table["isPrivate"] = True
+
+        # Marker temporal - el tableType definitivo se asigna al final
+        # (después de detectar isCalculatedTable en las partitions)
+        is_template = "__PBI_TemplateDateTable" in content
+        _temp_is_auto_datetime = (
+            is_template
+            or table_name.startswith("LocalDateTable_")
+            or table_name.startswith("DateTableTemplate_")
+        )
 
         # Extract columns
         col_pattern = re.compile(
@@ -130,11 +146,32 @@ class TMDLParser:
             table["measures"].append(measure)
 
         # Check for calculated table
-        partition_blocks = re.split(r"(?=^\tpartition\s+')", content, flags=re.MULTILINE)
-        for block in partition_blocks:
-            if "mode: import" not in block.lower() and re.search(r"expression\s*(?:=|:)", block):
-                if re.search(r"source\s*=\s*calculated", block, re.IGNORECASE):
-                    table["isCalculatedTable"] = True
+        # En TMDL real, una tabla calculada se declara así:
+        #   partition 'NombreTabla-GUID' = calculated
+        #       mode: import (opcional)
+        #       source = GROUPBY(...) o cualquier expresión DAX
+        # NO confundir con: partition X = m (Power Query) o partition X = entityRef
+        if re.search(r"^\tpartition\s+(?:'[^']+'|\"[^\"]+\"|\S+)\s*=\s*calculated\b",
+                     content, re.MULTILINE):
+            table["isCalculatedTable"] = True
+
+        # ── Asignación FINAL del tableType (después de detectar calculated) ──
+        # Prioridad: Auto Date/Time > system_hidden > calculated > user
+        if is_template or table_name.startswith("DateTableTemplate_"):
+            table["tableType"] = "auto_datetime_template"
+            table["isSystemTable"] = True
+        elif table_name.startswith("LocalDateTable_") and table["isHidden"]:
+            table["tableType"] = "auto_datetime_local"
+            table["isSystemTable"] = True
+        elif table["isHidden"] and table["isPrivate"]:
+            table["tableType"] = "system_hidden"
+            table["isSystemTable"] = True
+        elif table["isCalculatedTable"]:
+            table["tableType"] = "calculated"
+            table["isSystemTable"] = False
+        else:
+            table["tableType"] = "user"
+            table["isSystemTable"] = False
 
         return table
 

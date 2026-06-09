@@ -33,8 +33,31 @@ def render_memory_tab(result: AnalysisResult):
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Memoria Estimada", f"{estimation.total_estimated_mb:.1f} MB")
-    c2.metric("Modelo en Disco", f"{estimation.model_size_mb:.1f} MB")
-    c3.metric("Tablas", len(estimation.tables))
+
+    # Para PBIP no hay tamaño "en disco" real - solo metadatos TMDL
+    is_pbip_metadata = getattr(result, "model_size_source", "") == "pbip_metadata_only"
+    if is_pbip_metadata or estimation.model_size_mb <= 0:
+        c2.metric(
+            "Modelo en Disco",
+            "N/A",
+            help=(
+                "PBIP solo contiene metadatos (TMDL). "
+                "El tamano real del modelo (datos comprimidos VertiPaq) "
+                "solo se puede ver en Power BI Service o Desktop."
+            ),
+        )
+    else:
+        c2.metric(
+            "Modelo en Disco",
+            f"{estimation.model_size_mb:.1f} MB",
+            help="Tamano del modelo comprimido (PBIX archivo .zip)",
+        )
+
+    c3.metric(
+        "Tablas",
+        len(estimation.tables),
+        help="Solo tablas del usuario (excluye Auto Date/Time).",
+    )
     c4.metric(
         "Ratio Compresion",
         f"{estimation.compression_ratio:.1f}x" if estimation.compression_ratio else "N/A",

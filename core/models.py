@@ -172,7 +172,12 @@ class AnalysisResult:
     calculated_tables: int = 0
     bidirectional_relationships: int = 0
     model_size_mb: float = 0
+    model_size_source: str = ""  # 'pbix_zip', 'pbip_folder', 'unknown'
     auto_date_time_enabled: bool = False
+    auto_date_time_tables_count: int = 0  # Cuántas LocalDateTable + Template hay
+
+    # Desglose de tablas por tipo
+    tables_by_type: dict = field(default_factory=dict)
 
     # Design metrics
     slicers_count: int = 0

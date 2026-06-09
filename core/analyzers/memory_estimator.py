@@ -85,7 +85,11 @@ class MemoryEstimator:
 
         model = self.result._raw_model_data
         model_data = model.get("model", model)
-        tables = model_data.get("tables", [])
+        all_tables = model_data.get("tables", [])
+
+        # Filtrar tablas automáticas (Auto Date/Time) y del sistema
+        # No deben contarse para estimar memoria del modelo "real" del usuario
+        tables = [t for t in all_tables if not self._is_system_table(t)]
 
         if not tables:
             return estimation
@@ -104,9 +108,6 @@ class MemoryEstimator:
 
         for table in tables:
             tname = table.get("name", "")
-            # Skip auto date/time tables
-            if tname.startswith("LocalDateTable_") or tname.startswith("DateTableTemplate_"):
-                continue
 
             columns = table.get("columns", [])
             est_rows = table_row_estimates.get(tname, 1000)
@@ -185,16 +186,29 @@ class MemoryEstimator:
 
         return estimation
 
+    @staticmethod
+    def _is_system_table(t: dict) -> bool:
+        """Detecta tablas auto-generadas por Power BI (no del usuario)."""
+        if t.get("isSystemTable", False):
+            return True
+        if t.get("tableType", "") in ("auto_datetime_local", "auto_datetime_template", "system_hidden"):
+            return True
+        tname = t.get("name", "")
+        return tname.startswith("LocalDateTable_") or tname.startswith("DateTableTemplate_")
+
     def _estimate_table_rows(self, tables: list, total_rows: int) -> dict:
         """Distribute estimated rows among tables.
 
         Heuristic: tables with more columns and relationships (fact tables)
         typically have more rows.
+
+        Asume que `tables` ya viene filtrada (sin auto Date/Time / system).
         """
         scores = {}
         for table in tables:
             tname = table.get("name", "")
-            if tname.startswith("LocalDateTable_") or tname.startswith("DateTableTemplate_"):
+            # Safety check por si acaso entran auto-tables
+            if self._is_system_table(table):
                 continue
 
             col_count = len(table.get("columns", []))

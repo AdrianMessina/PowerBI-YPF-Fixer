@@ -78,9 +78,9 @@ def render_score_gauge(result: AnalysisResult) -> go.Figure:
     return fig
 
 
-def render_metric_card(label: str, value, status: str = "good"):
+def render_metric_card(label: str, value, status: str = "good", help: str | None = None):
     """Render a metric using native Streamlit."""
-    st.metric(label=label, value=value)
+    st.metric(label=label, value=value, help=help)
 
 
 def render_recommendation(rec):
@@ -106,15 +106,23 @@ def render_summary_metrics(result: AnalysisResult):
     st.sidebar.divider()
 
     metrics = [
-        ("Paginas", result.total_pages),
-        ("Visuals", result.total_visuals),
-        ("Tablas", result.total_tables),
-        ("Medidas", result.total_measures),
-        ("Relaciones", result.total_relationships),
+        ("Paginas", result.total_pages, None),
+        ("Visuals", result.total_visuals, None),
+        ("Tablas", result.total_tables,
+         "Solo tablas del usuario. Excluye LocalDateTable_* auto-generadas."),
+        ("Medidas", result.total_measures, None),
+        ("Relaciones", result.total_relationships, None),
     ]
 
-    for label, value in metrics:
-        st.sidebar.metric(label, value)
+    for label, value, tip in metrics:
+        st.sidebar.metric(label, value, help=tip)
+
+    # Indicador de Auto Date/Time en sidebar si está activo
+    auto_count = getattr(result, "auto_date_time_tables_count", 0)
+    if auto_count > 0:
+        st.sidebar.caption(
+            f"+ {auto_count} tablas auto-datetime ocultas"
+        )
 
     st.sidebar.divider()
 

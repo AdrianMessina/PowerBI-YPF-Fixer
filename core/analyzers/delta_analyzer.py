@@ -226,7 +226,11 @@ def compare_snapshots(path_a: str, path_b: str) -> DeltaResult:
 
 
 def _get_tables(result: AnalysisResult) -> list:
-    """Extract table names from raw model data."""
+    """Extract table names from raw model data.
+
+    Excluye tablas automáticas de Power BI (LocalDateTable_*, DateTableTemplate_*)
+    para que los snapshots y comparaciones reflejen solo el modelo del usuario.
+    """
     model = result._raw_model_data
     model_data = model.get("model", model)
     tables = model_data.get("tables", [])
@@ -235,4 +239,16 @@ def _get_tables(result: AnalysisResult) -> list:
         def __init__(self, name):
             self.name = name
 
-    return [T(t.get("name", "")) for t in tables if t.get("name", "")]
+    def _is_system(t: dict) -> bool:
+        if t.get("isSystemTable", False):
+            return True
+        if t.get("tableType", "") in ("auto_datetime_local", "auto_datetime_template", "system_hidden"):
+            return True
+        tname = t.get("name", "")
+        return tname.startswith("LocalDateTable_") or tname.startswith("DateTableTemplate_")
+
+    return [
+        T(t.get("name", ""))
+        for t in tables
+        if t.get("name", "") and not _is_system(t)
+    ]

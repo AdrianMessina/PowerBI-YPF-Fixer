@@ -39,9 +39,14 @@ def render_overview_tab(result: AnalysisResult):
             render_metric_card("Visuals", result.total_visuals,
                                _status_for("visualizations_per_page", result))
         with c3:
+            auto_count = getattr(result, "auto_date_time_tables_count", 0)
+            tables_help = "Solo tablas del usuario (excl. LocalDateTable auto-datetime)."
+            if auto_count > 0:
+                tables_help += f" Hay {auto_count} tablas auto-datetime ocultas."
             render_metric_card("Tablas",
                                result.total_tables if model_ok else "--",
-                               _status_for("tables_in_model", result))
+                               _status_for("tables_in_model", result),
+                               help=tables_help)
         with c4:
             render_metric_card("Medidas",
                                result.total_measures if model_ok else "--",

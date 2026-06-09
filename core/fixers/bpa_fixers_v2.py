@@ -22,7 +22,7 @@ class FixMeasureFolders(BaseFixer):
     def scan(self):
         model = self.result._raw_model_data
         model_data = model.get("model", model)
-        for table in model_data.get("tables", []):
+        for table in self._iter_user_tables(model_data):
             tname = table.get("name", "")
             for measure in table.get("measures", []):
                 if not measure.get("displayFolder"):
@@ -30,7 +30,7 @@ class FixMeasureFolders(BaseFixer):
                         f"[{tname}] Medida '{measure.get('name', '')}': sin displayFolder"
                     )
 
-        # TMDL check
+        # TMDL check (excluye tablas automáticas por defecto)
         if not self.issues:
             for _, content, tname in self._iter_tmdl_table_files():
                 blocks = re.split(r"(?=^\tmeasure\s+')", content, flags=re.MULTILINE)
@@ -57,7 +57,7 @@ class FixMeasureFolders(BaseFixer):
                 continue
             model = data.get("model", data)
             changed = False
-            for table in model.get("tables", []):
+            for table in self._iter_user_tables(model):
                 tname = table.get("name", "")
                 for measure in table.get("measures", []):
                     if not measure.get("displayFolder"):
@@ -70,7 +70,7 @@ class FixMeasureFolders(BaseFixer):
                 self._write_json_file(bim_path, data)
                 return
 
-        # TMDL format
+        # TMDL format (excluye automáticas)
         for fpath, content, tname in self._iter_tmdl_table_files():
             original = content
             blocks = re.split(r"(?=^\tmeasure\s+')", content, flags=re.MULTILINE)
@@ -121,7 +121,7 @@ class FixColumnFolders(BaseFixer):
     def scan(self):
         model = self.result._raw_model_data
         model_data = model.get("model", model)
-        for table in model_data.get("tables", []):
+        for table in self._iter_user_tables(model_data):
             tname = table.get("name", "")
             cols = table.get("columns", [])
             if len(cols) <= self.MIN_COLUMNS:
@@ -343,7 +343,7 @@ class FixSortByColumn(BaseFixer):
     def scan(self):
         model = self.result._raw_model_data
         model_data = model.get("model", model)
-        for table in model_data.get("tables", []):
+        for table in self._iter_user_tables(model_data):
             tname = table.get("name", "")
             columns = table.get("columns", [])
             col_names = {c.get("name", "").lower() for c in columns}
@@ -399,7 +399,7 @@ class FixDataCategoryGeo(BaseFixer):
     def scan(self):
         model = self.result._raw_model_data
         model_data = model.get("model", model)
-        for table in model_data.get("tables", []):
+        for table in self._iter_user_tables(model_data):
             tname = table.get("name", "")
             for col in table.get("columns", []):
                 if col.get("dataCategory"):
@@ -430,7 +430,7 @@ class FixDataCategoryGeo(BaseFixer):
                 continue
             model = data.get("model", data)
             changed = False
-            for table in model.get("tables", []):
+            for table in self._iter_user_tables(model):
                 tname = table.get("name", "")
                 for col in table.get("columns", []):
                     if col.get("dataCategory"):

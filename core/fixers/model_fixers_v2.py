@@ -74,6 +74,7 @@ class FixAutoDateTime(BaseFixer):
     def scan(self):
         model = self.result._raw_model_data
         model_data = model.get("model", model)
+        # NO filtrar - este fixer NECESITA ver las tablas automáticas para detectarlas
         for table in model_data.get("tables", []):
             tname = table.get("name", "")
             if any(tname.startswith(p) for p in self.AUTO_DT_PREFIXES):
@@ -82,9 +83,9 @@ class FixAutoDateTime(BaseFixer):
                     f"Deshabilitá Auto Date/Time y usá una tabla de calendario."
                 )
 
-        # Also check TMDL files
+        # Also check TMDL files - include_system=True para ver las automáticas
         if not self.issues:
-            for fpath, content, tname in self._iter_tmdl_table_files():
+            for fpath, content, tname in self._iter_tmdl_table_files(include_system=True):
                 if any(tname.startswith(p) for p in self.AUTO_DT_PREFIXES):
                     self.issues.append(
                         f"Tabla Auto Date/Time: '{tname}' en TMDL."
@@ -179,7 +180,15 @@ class FixCalendarTable(BaseFixer):
         model = self.result._raw_model_data
         model_data = model.get("model", model)
         for table in model_data.get("tables", []):
-            tname = table.get("name", "").lower().replace(" ", "").replace("_", "")
+            # IGNORAR tablas automáticas de Power BI (Auto Date/Time)
+            # NO son calendarios "reales" del usuario
+            if table.get("isSystemTable", False):
+                continue
+            tname_raw = table.get("name", "")
+            if tname_raw.startswith("LocalDateTable_") or tname_raw.startswith("DateTableTemplate_"):
+                continue
+
+            tname = tname_raw.lower().replace(" ", "").replace("_", "")
             if tname in self.CALENDAR_INDICATORS:
                 has_calendar = True
                 break
@@ -194,6 +203,12 @@ class FixCalendarTable(BaseFixer):
         # Also check TMDL
         if not has_calendar:
             for _, content, tname in self._iter_tmdl_table_files():
+                # IGNORAR tablas automáticas
+                if tname.startswith("LocalDateTable_") or tname.startswith("DateTableTemplate_"):
+                    continue
+                if "__PBI_TemplateDateTable" in content:
+                    continue
+
                 tname_clean = tname.lower().replace(" ", "").replace("_", "")
                 if tname_clean in self.CALENDAR_INDICATORS:
                     has_calendar = True
@@ -328,13 +343,22 @@ class FixMeasureTable(BaseFixer):
         model = self.result._raw_model_data
         model_data = model.get("model", model)
         for table in model_data.get("tables", []):
-            tname = table.get("name", "").lower().replace(" ", "")
+            # IGNORAR tablas automáticas (no son tablas de medidas reales)
+            if table.get("isSystemTable", False):
+                continue
+            tname_raw = table.get("name", "")
+            if tname_raw.startswith("LocalDateTable_") or tname_raw.startswith("DateTableTemplate_"):
+                continue
+
+            tname = tname_raw.lower().replace(" ", "")
             if tname in self.MEASURE_TABLE_NAMES:
                 has_measure_table = True
                 break
 
         if not has_measure_table:
             for _, _, tname in self._iter_tmdl_table_files():
+                if tname.startswith("LocalDateTable_") or tname.startswith("DateTableTemplate_"):
+                    continue
                 if tname.lower().replace(" ", "") in self.MEASURE_TABLE_NAMES:
                     has_measure_table = True
                     break
@@ -445,7 +469,7 @@ class FixTimeIntelligenceGroup(BaseFixer):
         # Check if a time intelligence calc group already exists
         model = self.result._raw_model_data
         model_data = model.get("model", model)
-        for table in model_data.get("tables", []):
+        for table in self._iter_user_tables(model_data):
             if table.get("calculationGroup"):
                 tname = table.get("name", "").lower()
                 if any(kw in tname for kw in ("time", "periodo", "temporal", "intelligence")):
@@ -537,7 +561,7 @@ class FixUnitsCalcGroup(BaseFixer):
     def scan(self):
         model = self.result._raw_model_data
         model_data = model.get("model", model)
-        for table in model_data.get("tables", []):
+        for table in self._iter_user_tables(model_data):
             if table.get("calculationGroup"):
                 tname = table.get("name", "").lower()
                 if any(kw in tname for kw in ("unit", "unidad", "scale", "escala", "format")):

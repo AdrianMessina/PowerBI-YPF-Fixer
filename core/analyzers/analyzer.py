@@ -34,10 +34,15 @@ class PowerBIAnalyzer:
             parser = PBIXParser(path)
             parsed = parser.parse()
             model_size = parser.get_model_size_mb()
+            model_size_source = "pbix_zip"
         else:
             parser = PBIPParser(path)
             parsed = parser.parse()
-            model_size = parsed.get("file_size_mb", 0)
+            # NOTA: En PBIP la carpeta solo contiene metadatos (TMDL/JSON), NO los datos.
+            # El tamaño real del modelo (datos comprimidos VertiPaq) NO está disponible.
+            # Reportamos None para no engañar - el usuario debe verificarlo en el servicio.
+            model_size = None
+            model_size_source = "pbip_metadata_only"
 
         result = AnalysisResult(
             report_name=os.path.basename(path),
@@ -45,7 +50,8 @@ class PowerBIAnalyzer:
             file_type=file_type,
             model_analysis_available=parsed.get("model_available", False),
             model_analysis_note=parsed.get("model_note", ""),
-            model_size_mb=model_size,
+            model_size_mb=model_size if model_size is not None else 0,
+            model_size_source=model_size_source,
         )
 
         # Store raw data for fixers
@@ -305,11 +311,49 @@ class PowerBIAnalyzer:
 
     def _analyze_model(self, result: AnalysisResult, model: dict):
         model_data = model.get("model", model)
-        tables = model_data.get("tables", [])
+        all_tables = model_data.get("tables", [])
         relationships = model_data.get("relationships", [])
+
+        # Categorizar tablas con precisión
+        tables_by_type = {
+            "user": [],
+            "calculated": [],
+            "auto_datetime_template": [],
+            "auto_datetime_local": [],
+            "system_hidden": [],
+        }
+        for t in all_tables:
+            ttype = t.get("tableType", "user")
+            # Si tmdl_parser no categorizó (fallback por nombre)
+            tname = t.get("name", "")
+            if ttype == "user":
+                if tname.startswith("LocalDateTable_"):
+                    ttype = "auto_datetime_local"
+                    t["tableType"] = ttype
+                    t["isSystemTable"] = True
+                elif tname.startswith("DateTableTemplate_"):
+                    ttype = "auto_datetime_template"
+                    t["tableType"] = ttype
+                    t["isSystemTable"] = True
+                elif t.get("isCalculatedTable"):
+                    ttype = "calculated"
+                    t["tableType"] = ttype
+            tables_by_type.setdefault(ttype, []).append(t)
+
+        # Tablas de usuario reales = user + calculated (creadas por el usuario)
+        tables = tables_by_type["user"] + tables_by_type["calculated"]
 
         result.total_tables = len(tables)
         result.total_relationships = len(relationships)
+
+        # Guardar desglose para reporte y debugging
+        result.tables_by_type = {
+            "user": len(tables_by_type["user"]),
+            "calculated": len(tables_by_type["calculated"]),
+            "auto_datetime_template": len(tables_by_type["auto_datetime_template"]),
+            "auto_datetime_local": len(tables_by_type["auto_datetime_local"]),
+            "system_hidden": len(tables_by_type["system_hidden"]),
+        }
 
         total_measures = 0
         total_columns = 0
@@ -317,6 +361,7 @@ class PowerBIAnalyzer:
         calc_columns = 0
         calc_tables = 0
 
+        # Iterar SOLO sobre tablas reales del usuario (no automáticas)
         for table in tables:
             tname = table.get("name", "")
             measures = table.get("measures", [])
@@ -396,9 +441,11 @@ class PowerBIAnalyzer:
 
         result.bidirectional_relationships = bidi_count
 
-        # Auto date/time detection
-        auto_dt_tables = [t for t in tables if t.get("name", "").startswith("LocalDateTable_") or t.get("name", "").startswith("DateTableTemplate_")]
-        result.auto_date_time_enabled = len(auto_dt_tables) > 0
+        # Auto date/time detection - usar lista completa de tablas, no solo las filtradas
+        auto_dt_count = (tables_by_type["auto_datetime_template"].__len__()
+                         + tables_by_type["auto_datetime_local"].__len__())
+        result.auto_date_time_enabled = auto_dt_count > 0
+        result.auto_date_time_tables_count = auto_dt_count
 
     def _is_complex_measure(self, expression: str) -> bool:
         """A measure is 'complex' if it uses VAR, CALCULATE with filters, or nested functions."""

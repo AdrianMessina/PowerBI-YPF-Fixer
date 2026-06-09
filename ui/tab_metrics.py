@@ -31,10 +31,38 @@ def _render_model_metrics(result: AnalysisResult):
         return
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Tablas", result.total_tables)
+    c1.metric(
+        "Tablas",
+        result.total_tables,
+        help="Solo tablas creadas por el usuario. Excluye tablas automaticas de Auto Date/Time."
+    )
     c2.metric("Columnas", result.total_columns)
     c3.metric("Col. Calculadas", result.calculated_columns)
     c4.metric("Tablas Calculadas", result.calculated_tables)
+
+    # Desglose de tablas por tipo (transparencia para el usuario)
+    tables_by_type = getattr(result, "tables_by_type", {}) or {}
+    if tables_by_type:
+        with st.expander("Desglose de tablas por tipo"):
+            user_count = tables_by_type.get("user", 0)
+            calc_count = tables_by_type.get("calculated", 0)
+            auto_local = tables_by_type.get("auto_datetime_local", 0)
+            auto_template = tables_by_type.get("auto_datetime_template", 0)
+            sys_hidden = tables_by_type.get("system_hidden", 0)
+            total_tmdl = user_count + calc_count + auto_local + auto_template + sys_hidden
+
+            st.markdown(f"""
+**Contabilizadas ({result.total_tables}):**
+- {user_count} de datos (Import / DirectQuery)
+- {calc_count} calculadas (DAX)
+
+**Excluidas (auto-generadas por Power BI):**
+- {auto_template} DateTableTemplate
+- {auto_local} LocalDateTable (una por cada columna de fecha cuando Auto Date/Time esta activo)
+- {sys_hidden} ocultas del sistema
+
+**Total fisico en TMDL:** {total_tmdl} archivos `.tmdl`
+            """)
 
     # Columns by table
     if result.columns_by_table:
@@ -51,11 +79,19 @@ def _render_model_metrics(result: AnalysisResult):
         df = pd.DataFrame(result.calculated_columns_detail)
         st.dataframe(df, use_container_width=True, hide_index=True)
 
-    # Threshold comparison
+    # Threshold comparison - en PBIP el model_size_mb no esta disponible
     st.markdown("##### Comparacion con Umbrales")
-    _render_threshold_chart(result, [
-        "tables_in_model", "calculated_columns", "model_size_mb"
-    ])
+    is_pbip_metadata = getattr(result, "model_size_source", "") == "pbip_metadata_only"
+    metric_keys = ["tables_in_model", "calculated_columns"]
+    if not is_pbip_metadata:
+        metric_keys.append("model_size_mb")
+    _render_threshold_chart(result, metric_keys)
+
+    if is_pbip_metadata:
+        st.caption(
+            "Tamano del modelo no disponible para PBIP (solo metadatos). "
+            "Verifica el tamano real en Power BI Service."
+        )
 
 
 def _render_dax_metrics(result: AnalysisResult):
@@ -63,8 +99,21 @@ def _render_dax_metrics(result: AnalysisResult):
     c1, c2, c3 = st.columns(3)
     c1.metric("Total Medidas", result.total_measures)
     c2.metric("Medidas Complejas", result.complex_dax_measures)
-    c3.metric("Auto Date/Time",
-              "Habilitado" if result.auto_date_time_enabled else "Deshabilitado")
+
+    auto_count = getattr(result, "auto_date_time_tables_count", 0)
+    if result.auto_date_time_enabled:
+        c3.metric(
+            "Auto Date/Time",
+            "Habilitado",
+            delta=f"{auto_count} tablas auto" if auto_count else None,
+            delta_color="inverse",
+            help=(
+                "Power BI genera tablas ocultas LocalDateTable_* por cada columna de fecha. "
+                "Recomendado: deshabilitar y usar una tabla de calendario explicita."
+            ),
+        )
+    else:
+        c3.metric("Auto Date/Time", "Deshabilitado")
 
     # Measures by table
     if result.measures_by_table:

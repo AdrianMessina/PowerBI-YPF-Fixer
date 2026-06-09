@@ -53,7 +53,7 @@ class FixDivideOperator(BaseFixer):
                 continue
             model = data.get("model", data)
             changed = False
-            for table in model.get("tables", []):
+            for table in self._iter_user_tables(model):
                 for measure in table.get("measures", []):
                     expr = measure.get("expression", "")
                     if self._has_raw_division(expr):
@@ -144,7 +144,7 @@ class FixMeasureDescriptions(BaseFixer):
                 continue
             model = data.get("model", data)
             changed = False
-            for table in model.get("tables", []):
+            for table in self._iter_user_tables(model):
                 for measure in table.get("measures", []):
                     if not measure.get("description"):
                         measure["description"] = f"Medida: {measure.get('name', '')}"
@@ -285,7 +285,7 @@ class FixColumnNaming(BaseFixer):
                 continue
             model = data.get("model", data)
             changed = False
-            for table in model.get("tables", []):
+            for table in self._iter_user_tables(model):
                 tname = table.get("name", "")
                 trimmed = tname.strip()
                 if tname != trimmed:
@@ -358,7 +358,7 @@ class FixHideForeignKeys(BaseFixer):
                 continue
             model = data.get("model", data)
             changed = False
-            for table in model.get("tables", []):
+            for table in self._iter_user_tables(model):
                 tname = table.get("name", "")
                 for col in table.get("columns", []):
                     cname = col.get("name", "")
@@ -431,7 +431,7 @@ class FixSummarizeByNone(BaseFixer):
                 continue
             model = data.get("model", data)
             changed = False
-            for table in model.get("tables", []):
+            for table in self._iter_user_tables(model):
                 for col in table.get("columns", []):
                     dt = col.get("dataType", "").lower()
                     sb = col.get("summarizeBy", "").lower()
