@@ -191,14 +191,30 @@ class FixVisualTabOrder(BaseFixer):
                 vdata = self._read_json_file(vpath)
                 if not vdata:
                     continue
-                pos = vdata.get("position", {})
-                tab = vdata.get("tabOrder", -1)
+                pos = vdata.get("position", {}) or {}
+                # tabOrder lives under position in PBIR schema 2.6.0+.
+                # Also accept root-level (legacy / broken files) for detection.
+                tab = pos.get("tabOrder", vdata.get("tabOrder", -1))
+                root_tab_invalid = "tabOrder" in vdata  # root-level is invalid
                 visuals_positions.append({
                     "id": vid,
                     "x": pos.get("x", 0),
                     "y": pos.get("y", 0),
                     "tab": tab,
+                    "root_invalid": root_tab_invalid,
                 })
+
+            if not visuals_positions:
+                continue
+
+            # ALWAYS report when any file has invalid root-level tabOrder so the
+            # fix() pass can clean them up — regardless of spatial-order analysis.
+            invalid_root = [v for v in visuals_positions if v["root_invalid"]]
+            if invalid_root:
+                self.issues.append(
+                    f"[{page_name}] {len(invalid_root)} visual(es) con tabOrder en root "
+                    f"(invalid en schema 2.6.0+; debe ir bajo position)"
+                )
 
             if len(visuals_positions) < 2:
                 continue
@@ -233,7 +249,7 @@ class FixVisualTabOrder(BaseFixer):
                 vdata = self._read_json_file(vpath)
                 if not vdata:
                     continue
-                pos = vdata.get("position", {})
+                pos = vdata.get("position", {}) or {}
                 visuals.append({
                     "path": vpath,
                     "data": vdata,
@@ -242,22 +258,48 @@ class FixVisualTabOrder(BaseFixer):
                     "y": pos.get("y", 0),
                 })
 
+            if not visuals:
+                continue
+
+            # PASS 1 — strip any invalid root-level tabOrder. PBIR schema 2.6.0+
+            # only allows tabOrder under `position`, never at the root. Files
+            # written by older versions of this fixer have it at the root and
+            # Power BI Desktop rejects them with "schema does not allow
+            # additional properties".
+            cleaned_root = 0
+            for v in visuals:
+                if "tabOrder" in v["data"]:
+                    # If position has no tabOrder yet, migrate the value down.
+                    pos = v["data"].setdefault("position", {})
+                    if "tabOrder" not in pos:
+                        pos["tabOrder"] = v["data"]["tabOrder"]
+                    del v["data"]["tabOrder"]
+                    self._write_json_file(v["path"], v["data"])
+                    cleaned_root += 1
+
+            if cleaned_root:
+                self.fixes_applied.append(
+                    f"[{page_name}] tabOrder en root removido de {cleaned_root} visual(es)"
+                )
+
             if len(visuals) < 2:
                 continue
 
-            # Sort by spatial position and assign tab order
+            # PASS 2 — reassign tab order so it follows spatial reading order
+            # (top-left to bottom-right). Write to position.tabOrder.
             sorted_visuals = sorted(visuals, key=lambda v: (v["y"] // 100, v["x"]))
-            changed = False
+            reordered = 0
             for idx, v in enumerate(sorted_visuals):
                 new_tab = (idx + 1) * 1000
-                if v["data"].get("tabOrder") != new_tab:
-                    v["data"]["tabOrder"] = new_tab
+                pos = v["data"].setdefault("position", {})
+                if pos.get("tabOrder") != new_tab:
+                    pos["tabOrder"] = new_tab
                     self._write_json_file(v["path"], v["data"])
-                    changed = True
+                    reordered += 1
 
-            if changed:
+            if reordered:
                 self.fixes_applied.append(
-                    f"[{page_name}] Tab order actualizado para {len(visuals)} visuals"
+                    f"[{page_name}] position.tabOrder actualizado en {reordered} visual(es)"
                 )
 
 
