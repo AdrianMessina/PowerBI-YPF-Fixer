@@ -35,8 +35,13 @@ class FixPieCharts(BaseFixer):
             if vtype not in self.PIE_TYPES:
                 continue
 
-            # Change visual type
-            if "singleVisual" in data.get("config", data):
+            # Write to whichever structure the file actually uses. PBIR 2.6+
+            # nests visualType under `visual`; older PBIP nests under
+            # `config.singleVisual`. Root-level visualType is invalid per the
+            # 2.6 schema but we tolerate it if the file already has it.
+            if isinstance(data.get("visual"), dict) and "visualType" in data["visual"]:
+                data["visual"]["visualType"] = self.REPLACEMENT_TYPE
+            elif "singleVisual" in data.get("config", data):
                 target = data.get("config", data)
                 if isinstance(target, str):
                     target = json.loads(target)
@@ -52,6 +57,11 @@ class FixPieCharts(BaseFixer):
             )
 
     def _get_visual_type(self, data: dict) -> str:
+        # PBIR 2.6+: visualType under `visual`.
+        v = data.get("visual")
+        if isinstance(v, dict) and v.get("visualType"):
+            return v["visualType"]
+        # Legacy formats
         config = data.get("config", data)
         if isinstance(config, str):
             try:
