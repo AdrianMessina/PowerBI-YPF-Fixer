@@ -282,14 +282,33 @@ class FixerEngine:
 
     @staticmethod
     def create_backup(result: AnalysisResult, fixer_ids: list = None) -> BackupInfo:
-        """Create a backup with metadata tracking."""
-        base_path = result._report_base_path or result.report_path
-        if not os.path.isdir(base_path):
-            base_path = os.path.dirname(base_path)
+        """Create a backup of both .Report and .SemanticModel folders.
+
+        Model-side fixers modify the .SemanticModel (sibling of .Report). The
+        previous implementation only backed up .Report, leaving no way to
+        revert model changes. This now snapshots both into the same backup
+        folder under Report/ and SemanticModel/ subdirs, with the .SemanticModel
+        path recorded in metadata so restore() puts each one back where it came.
+        """
+        report_base = result._report_base_path or result.report_path
+        if not os.path.isdir(report_base):
+            report_base = os.path.dirname(report_base)
+
+        model_base = getattr(result, "_model_base_path", None)
+        if model_base and not os.path.isdir(model_base):
+            model_base = None
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_path = f"{base_path}_backup_{timestamp}"
-        shutil.copytree(base_path, backup_path, dirs_exist_ok=False)
+        backup_path = f"{report_base}_backup_{timestamp}"
+        os.makedirs(backup_path, exist_ok=False)
+
+        report_dst = os.path.join(backup_path, "Report")
+        shutil.copytree(report_base, report_dst)
+
+        model_dst = None
+        if model_base:
+            model_dst = os.path.join(backup_path, "SemanticModel")
+            shutil.copytree(model_base, model_dst)
 
         file_count = sum(len(files) for _, _, files in os.walk(backup_path))
         size_mb = sum(
@@ -306,7 +325,6 @@ class FixerEngine:
             applied_fixers=fixer_ids or [],
         )
 
-        # Save metadata file inside backup
         meta_path = os.path.join(backup_path, ".backup_metadata.json")
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump({
@@ -315,21 +333,52 @@ class FixerEngine:
                 "file_count": info.file_count,
                 "size_mb": info.size_mb,
                 "applied_fixers": info.applied_fixers,
+                "report_origin": report_base,
+                "model_origin": model_base,
+                "layout": "v2_with_model",
             }, f, indent=2)
 
         return info
 
     @staticmethod
     def restore_backup(backup_path: str, target_path: str) -> bool:
-        """Restore project from backup."""
+        """Restore project from backup. Handles both legacy and v2 layouts.
+
+        v2 layout (with model): backup_path contains Report/ + SemanticModel/
+        subdirs and metadata records the original origins. Each is restored to
+        its recorded origin (report_origin / model_origin).
+
+        Legacy layout: backup_path IS the Report folder copy. Restored to
+        target_path as before.
+        """
         try:
-            meta = os.path.join(backup_path, ".backup_metadata.json")
-            if not os.path.exists(meta):
+            meta_path = os.path.join(backup_path, ".backup_metadata.json")
+            if not os.path.exists(meta_path):
                 return False
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+
+            if meta.get("layout") == "v2_with_model":
+                report_src = os.path.join(backup_path, "Report")
+                model_src = os.path.join(backup_path, "SemanticModel")
+                report_dst = meta.get("report_origin") or target_path
+                model_dst = meta.get("model_origin")
+
+                if os.path.isdir(report_src) and report_dst:
+                    if os.path.exists(report_dst):
+                        shutil.rmtree(report_dst)
+                    shutil.copytree(report_src, report_dst)
+
+                if os.path.isdir(model_src) and model_dst:
+                    if os.path.exists(model_dst):
+                        shutil.rmtree(model_dst)
+                    shutil.copytree(model_src, model_dst)
+                return True
+
+            # Legacy: backup folder IS the Report
             if os.path.exists(target_path):
                 shutil.rmtree(target_path)
             shutil.copytree(backup_path, target_path)
-            # Remove metadata file from restored copy
             restored_meta = os.path.join(target_path, ".backup_metadata.json")
             if os.path.exists(restored_meta):
                 os.remove(restored_meta)

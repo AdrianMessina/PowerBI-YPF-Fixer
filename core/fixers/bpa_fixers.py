@@ -65,25 +65,57 @@ class FixDivideOperator(BaseFixer):
             if changed:
                 self._write_json_file(bim_path, data)
 
-    def _has_raw_division(self, expr: str) -> bool:
-        """Check if expression uses / operator (excluding URLs and comments)."""
-        if not expr:
-            return False
-        # Remove strings, comments, and URLs
+    def _strip_noise(self, expr: str) -> str:
+        """Strip strings, comments, URLs, and bracketed column refs so the
+        remaining text contains only structural DAX. Column refs like
+        `Table[USD/BBL]` carry slashes that are NOT division operators."""
         cleaned = re.sub(r'"[^"]*"', '', expr)
         cleaned = re.sub(r'//.*$', '', cleaned, flags=re.MULTILINE)
         cleaned = re.sub(r'/\*.*?\*/', '', cleaned, flags=re.DOTALL)
         cleaned = re.sub(r'https?://\S+', '', cleaned)
-        # Check for division operator (not in DIVIDE() context)
+        # Bracketed names: [Column With/Slash], [USD/BBL], etc.
+        cleaned = re.sub(r'\[[^\]]*\]', '[]', cleaned)
+        # Quoted table names: 'Some/Table'
+        cleaned = re.sub(r"'[^']*'", "''", cleaned)
+        return cleaned
+
+    def _has_raw_division(self, expr: str) -> bool:
+        """Check if expression uses / as a division operator."""
+        if not expr:
+            return False
+        cleaned = self._strip_noise(expr)
         if "DIVIDE(" in cleaned.upper():
             return False
         return bool(re.search(r'[^/]\s*/\s*[^/\*]', cleaned))
 
     def _replace_division(self, expr: str) -> str:
-        """Replace simple A / B patterns with DIVIDE(A, B)."""
-        # Simple replacement for obvious patterns like [Measure1] / [Measure2]
-        pattern = r'(\[[^\]]+\]|\w+\([^)]*\))\s*/\s*(\[[^\]]+\]|\w+\([^)]*\))'
-        return re.sub(pattern, r'DIVIDE(\1, \2)', expr)
+        """Replace simple A / B patterns with DIVIDE(A, B).
+
+        Handles common DAX patterns:
+        - `[Measure] / [Measure]`
+        - `[Measure] / 1000000`
+        - `SUM(Table[Col]) / NUMBER`
+        - `Table[Col] / NUMBER`
+        Complex multi-line or nested-function divisors are left alone — the
+        fixer should not produce broken DAX from a guess. Those cases get
+        reported but require manual review.
+        """
+        operand = (
+            r'(?:'
+            r'[\w.]+\[[^\]]+\]'           # Table[Col]
+            r'|\[[^\]]+\]'                # [Measure]
+            r'|[A-Z_][\w]*\([^()]*\)'     # FUNC(simple args)
+            r'|\d+(?:\.\d+)?'             # numeric literal
+            r')'
+        )
+        pattern = rf'({operand})\s*/\s*({operand})'
+        prev = None
+        out = expr
+        # Apply repeatedly so newly-formed DIVIDE() doesn't block adjacent matches
+        while prev != out:
+            prev = out
+            out = re.sub(pattern, r'DIVIDE(\1, \2)', out)
+        return out
 
     def _fix_divisions_in_tmdl(self, content: str) -> str:
         """Fix divisions in TMDL file content."""
@@ -156,34 +188,25 @@ class FixMeasureDescriptions(BaseFixer):
                 self._write_json_file(bim_path, data)
                 return
 
-        # Try TMDL format
+        # Try TMDL format — descriptions in TMDL use /// before the object,
+        # NOT a `description:` property (which is invalid and breaks Power BI).
         for fpath, content, tname in self._iter_tmdl_table_files():
             original = content
-            # Find measures without description and add one
-            blocks = re.split(r"(?=^\tmeasure\s+')", content, flags=re.MULTILINE)
-            new_blocks = []
-            for block in blocks:
-                mm = re.match(r"^\tmeasure\s+'([^']+)'", block)
-                if mm and "description:" not in block:
+            lines = content.split("\n")
+            new_lines = []
+            for line in lines:
+                mm = re.match(r"^\tmeasure\s+'([^']+)'", line)
+                if mm:
                     mname = mm.group(1)
-                    # Add description after the measure line
-                    lines = block.split("\n")
-                    new_lines = [lines[0]]
-                    inserted = False
-                    for line in lines[1:]:
-                        if not inserted and (line.startswith("\t\t") or line.strip() == ""):
-                            new_lines.append(f"\t\tdescription: Medida: {mname}")
-                            inserted = True
-                        new_lines.append(line)
-                    if not inserted:
-                        new_lines.insert(1, f"\t\tdescription: Medida: {mname}")
-                    block = "\n".join(new_lines)
-                    self.fixes_applied.append(
-                        f"[{tname}] Medida '{mname}': descripción agregada"
-                    )
-                new_blocks.append(block)
+                    prev = new_lines[-1] if new_lines else ""
+                    if not prev.lstrip().startswith("///"):
+                        new_lines.append(f"\t/// Medida: {mname}")
+                        self.fixes_applied.append(
+                            f"[{tname}] Medida '{mname}': descripción agregada"
+                        )
+                new_lines.append(line)
 
-            new_content = "".join(new_blocks)
+            new_content = "\n".join(new_lines)
             if new_content != original:
                 with open(fpath, "w", encoding="utf-8") as f:
                     f.write(new_content)
@@ -405,7 +428,7 @@ class FixSummarizeByNone(BaseFixer):
     severity = "info"
     requires_pbip = True
 
-    NON_AGGREGATE_TYPES = {"string", "dateTime", "boolean"}
+    NON_AGGREGATE_TYPES = {"string", "datetime", "boolean"}  # lower-case for comparison
 
     def scan(self):
         for col in self.result.columns_detail:
@@ -419,6 +442,8 @@ class FixSummarizeByNone(BaseFixer):
     def fix(self):
         model_def = self._get_model_definition_path()
 
+        # BIM format
+        bim_fixed = False
         for bim_name in ("model.bim", "dataset.bim"):
             bim_path = os.path.join(model_def, bim_name)
             if not os.path.exists(bim_path):
@@ -443,6 +468,50 @@ class FixSummarizeByNone(BaseFixer):
                         )
             if changed:
                 self._write_json_file(bim_path, data)
+                bim_fixed = True
+
+        if bim_fixed:
+            return
+
+        # TMDL format: walk each table file, parse columns, flip summarizeBy
+        # when dataType is string/dateTime/boolean.
+        for fpath, content, tname in self._iter_tmdl_table_files():
+            original = content
+            lines = content.split("\n")
+            out = []
+            # State: track current column block.
+            in_column = False
+            col_dtype = ""
+            col_name = ""
+            col_buffer_start = 0  # not used; we just rewrite line-by-line
+            for line in lines:
+                col_match = re.match(r"^\tcolumn\s+(?:'([^']+)'|([\w.]+))", line)
+                if col_match:
+                    in_column = True
+                    col_name = col_match.group(1) or col_match.group(2) or ""
+                    col_dtype = ""
+                    out.append(line)
+                    continue
+                # End of column block: another top-level decl
+                if in_column and re.match(r"^\t(column|measure|partition|annotation|hierarchy)\b", line):
+                    in_column = False
+                if in_column:
+                    dt_match = re.match(r"^\t\tdataType:\s*(\w+)", line)
+                    if dt_match:
+                        col_dtype = dt_match.group(1).lower()
+                    sb_match = re.match(r"^\t\tsummarizeBy:\s*(\w+)", line)
+                    if sb_match and col_dtype in self.NON_AGGREGATE_TYPES:
+                        sb_val = sb_match.group(1).lower()
+                        if sb_val not in ("none", ""):
+                            line = "\t\tsummarizeBy: none"
+                            self.fixes_applied.append(
+                                f"[{tname}] Columna '{col_name}': SummarizeBy -> none"
+                            )
+                out.append(line)
+            new_content = "\n".join(out)
+            if new_content != original:
+                with open(fpath, "w", encoding="utf-8") as f:
+                    f.write(new_content)
 
 
 class FixFloatingPointTypes(BaseFixer):

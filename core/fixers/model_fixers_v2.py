@@ -321,10 +321,10 @@ class FixMeasureTable(BaseFixer):
     TMDL_CONTENT = '''table _Measures
 \tlineageTag: {table-tag}
 
+\t/// Fecha y hora del ultimo refresh del modelo
 \tmeasure 'Last Refresh' = NOW()
 \t\tformatString: dd/MM/yyyy HH:mm:ss
 \t\tlineageTag: {measure-tag}
-\t\tdescription: Fecha y hora del ultimo refresh del modelo
 
 \tcolumn Value
 \t\tdataType: int64
