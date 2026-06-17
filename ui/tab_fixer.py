@@ -9,10 +9,147 @@ Design principles applied:
 - Validation after every fix
 """
 
+import io
+import os
+import re
+import zipfile
 import streamlit as st
 from core.models import AnalysisResult, FileType, FixMode
 from core.fixers.base import FixerEngine
 from core.environment import is_cloud
+
+
+def _reanalyze_and_rescan(engine, result, scan_key):
+    """Re-run analysis from disk so model fixers see updated state, then re-scan.
+
+    Model-side fixers (descriptions, divide, FK, summarizeBy, folders, ...)
+    scan `result.measures_detail` / `.relationships_detail` / `.tables_detail`,
+    which are snapshots from the INITIAL analysis. Without a re-analysis, the
+    re-scan reports the same issues even though the files on disk were fixed.
+    """
+    analyzer = st.session_state.get("analyzer")
+    target_path = (
+        getattr(result, "_report_base_path", None)
+        or getattr(result, "report_path", None)
+    )
+    new_result = None
+    if analyzer and target_path:
+        try:
+            new_result = analyzer.analyze(target_path)
+            st.session_state.analysis_result = new_result
+        except Exception:
+            new_result = None
+
+    active = new_result or result
+    new_scans = engine.scan_all(active)
+    if not active.model_analysis_available:
+        new_scans = [s for s in new_scans if s.category != "model"]
+    st.session_state[scan_key] = new_scans
+    return active
+
+
+_DOWNLOAD_EXCLUDE_FILE_SUFFIXES = (
+    ".bak",
+    ".tmp",
+    ".swp",
+    ".pyc",
+)
+_DOWNLOAD_EXCLUDE_FILE_NAMES = {
+    ".backup_metadata.json",
+    "Thumbs.db",
+    ".DS_Store",
+    "desktop.ini",
+}
+_DOWNLOAD_EXCLUDE_DIR_NAMES = {
+    "__pycache__",
+    ".git",
+    ".vs",
+    ".vscode",
+}
+
+
+def _should_exclude_from_download(rel_path: str, name: str) -> bool:
+    """Skip junk that piles up between fix runs and bloats the ZIP.
+
+    Matches:
+    - .bak / .bak_<timestamp> backups left by editors or older fixers
+    - .tmp / .swp scratch files
+    - Python / OS metadata (Thumbs.db, .DS_Store, desktop.ini)
+    - sibling backup folders that landed inside the project by mistake
+      (e.g. *.Report_backup_YYYYMMDD_HHMMSS/...)
+    """
+    # Path inside any excluded directory?
+    parts = rel_path.replace("\\", "/").split("/")
+    for p in parts:
+        if p in _DOWNLOAD_EXCLUDE_DIR_NAMES:
+            return True
+        if "_backup_" in p and (p.endswith(".Report") is False):
+            # Nested backup directory (e.g. Foo.Report_backup_20260617_*)
+            # Sibling backups are outside base_path so won't appear, but if
+            # one was accidentally nested, skip it.
+            if any(part.startswith(p[:-1]) for part in parts):
+                pass  # fallthrough — only block if path starts with a backup dir
+            return True
+    # Specific file names
+    if name in _DOWNLOAD_EXCLUDE_FILE_NAMES:
+        return True
+    # Suffix match (.bak, .bak_TIMESTAMP both end in .bak* — use startswith on suffix)
+    lower = name.lower()
+    for suf in _DOWNLOAD_EXCLUDE_FILE_SUFFIXES:
+        if lower.endswith(suf):
+            return True
+    # .bak followed by anything: foo.json.bak_20260616_1140
+    if ".bak" in lower:
+        # Match a .bak token that's a real suffix marker, not part of a real name
+        if re.search(r"\.bak(?:[._-]|$)", lower):
+            return True
+    return False
+
+
+def _build_project_zip(base_path: str) -> bytes:
+    """Build a ZIP from a project folder for download.
+
+    Includes .Report AND .SemanticModel (siblings in a PBIP layout) but
+    EXCLUDES junk files that accumulate between fix runs (.bak*, __pycache__,
+    OS metadata) so each download is a clean snapshot of the project.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, dirs, files in os.walk(base_path):
+            # Prune excluded directories in-place so os.walk doesn't descend
+            dirs[:] = [d for d in dirs if d not in _DOWNLOAD_EXCLUDE_DIR_NAMES]
+            for f in files:
+                fpath = os.path.join(root, f)
+                arcname = os.path.relpath(fpath, os.path.dirname(base_path))
+                if _should_exclude_from_download(arcname, f):
+                    continue
+                zf.write(fpath, arcname)
+    return buf.getvalue()
+
+
+def _project_source_path(result) -> str | None:
+    """Return the folder to ZIP for download.
+
+    Cloud: the extracted temp dir (contains .Report, .SemanticModel, .pbip).
+    Local: the PARENT of the .Report folder, so the ZIP also captures the
+    sibling .SemanticModel where the model TMDL lives. Falls back to the
+    .Report folder if no sibling exists.
+    """
+    if is_cloud():
+        return st.session_state.get("extracted_path")
+
+    report_base = getattr(result, "_report_base_path", None) or result.report_path
+    if not report_base:
+        return None
+    if not os.path.isdir(report_base):
+        report_base = os.path.dirname(report_base)
+
+    model_base = getattr(result, "_model_base_path", None)
+    if model_base and os.path.isdir(model_base):
+        parent = os.path.dirname(report_base)
+        if parent and os.path.dirname(model_base) == parent:
+            return parent
+    return report_base
 
 
 # ── Fixer descriptions: what each fixer does in plain language ──
@@ -186,6 +323,7 @@ def render_fixer_tab(result: AnalysisResult):
             if not result.model_analysis_available:
                 scans = [s for s in scans if s.category != "model"]
             st.session_state[scan_key] = scans
+        st.rerun()
 
     if do_restore:
         _render_restore_ui(engine, result)
@@ -207,6 +345,39 @@ def render_fixer_tab(result: AnalysisResult):
 
     auto_fixable = [s for s in with_issues if not getattr(s, "is_manual", False)]
     manual_only = [s for s in with_issues if getattr(s, "is_manual", False)]
+
+    # ── Bulk actions: Fix All + Download ────────────────────────
+    if auto_fixable or _project_source_path(result):
+        col_all, col_dl, _ = st.columns([1.4, 1.4, 1.2])
+
+        with col_all:
+            if auto_fixable:
+                total_auto = sum(s.issues_found for s in auto_fixable)
+                if st.button(
+                    f"Aplicar todos ({len(auto_fixable)} fixers · {total_auto} issues)",
+                    type="primary",
+                    key="fix_all_btn",
+                    use_container_width=True,
+                ):
+                    _apply_all_fixes(engine, auto_fixable, result, scan_key)
+
+        with col_dl:
+            src = _project_source_path(result)
+            if src and os.path.isdir(src):
+                try:
+                    zip_bytes = _build_project_zip(src)
+                    st.download_button(
+                        "Descargar ZIP corregido",
+                        data=zip_bytes,
+                        file_name=f"{result.report_name}_fixed.zip",
+                        mime="application/zip",
+                        key="fix_dl_btn",
+                        use_container_width=True,
+                    )
+                except Exception as e:
+                    st.caption(f"Descarga no disponible: {e}")
+
+        st.divider()
 
     # ── Filter state ────────────────────────────────────────────
     filter_key = f"filter_{result.report_path}"
@@ -360,6 +531,69 @@ def _render_fixer_item(sr, engine, result, scan_key):
                 _apply_fix(engine, sr, result, scan_key)
 
 
+def _apply_all_fixes(engine, auto_fixable, result, scan_key):
+    """Run every auto-fixable fixer in sequence with a single re-scan at the end."""
+    if not is_cloud():
+        with st.spinner("Creando backup..."):
+            try:
+                bk = engine.create_backup(
+                    result,
+                    fixer_ids=[sr.fixer_id for sr in auto_fixable],
+                )
+                st.caption(f"Backup: `{bk.backup_path}`")
+            except Exception as e:
+                st.error(f"Error en backup: {e}")
+                return
+
+    total = len(auto_fixable)
+    applied_ok = 0
+    applied_partial = 0
+    failed = 0
+    total_resolved = 0
+    progress = st.progress(0, text=f"Aplicando 0/{total}...")
+
+    for i, sr in enumerate(auto_fixable, start=1):
+        progress.progress(i / total, text=f"Aplicando {i}/{total}: {sr.fixer_name}")
+        try:
+            fr = engine.run_single(sr.fixer_id, result, FixMode.SCAN_AND_FIX)
+        except Exception:
+            fr = None
+
+        if not fr:
+            failed += 1
+            continue
+
+        val = fr.validation_result or {}
+        if val.get("passed", False):
+            applied_ok += 1
+            total_resolved += val.get("issues_resolved", fr.issues_fixed or 0)
+        elif fr.issues_fixed and fr.issues_fixed > 0:
+            applied_partial += 1
+            total_resolved += fr.issues_fixed
+        else:
+            failed += 1
+
+    progress.empty()
+
+    if applied_ok:
+        st.success(
+            f"Aplicados OK: {applied_ok}/{total} · {total_resolved} issue(s) resueltos."
+        )
+    if applied_partial:
+        st.warning(f"Parciales: {applied_partial}")
+    if failed:
+        st.error(f"Fallidos: {failed}")
+
+    with st.spinner("Re-analizando..."):
+        _reanalyze_and_rescan(engine, result, scan_key)
+
+    if is_cloud():
+        st.info("Use 'Descargar ZIP corregido' arriba para obtener el proyecto.")
+    else:
+        st.info("Recargue el proyecto en Power BI Desktop para ver los cambios.")
+    st.rerun()
+
+
 def _apply_fix(engine, sr, result, scan_key):
     if not is_cloud():
         with st.spinner("Creando backup..."):
@@ -386,11 +620,8 @@ def _apply_fix(engine, sr, result, scan_key):
             f"{val.get('issues_remaining', '?')} restantes."
         )
 
-    with st.spinner("Re-escaneando..."):
-        new_scans = engine.scan_all(result)
-        if not result.model_analysis_available:
-            new_scans = [s for s in new_scans if s.category != "model"]
-        st.session_state[scan_key] = new_scans
+    with st.spinner("Re-analizando..."):
+        _reanalyze_and_rescan(engine, result, scan_key)
 
     if is_cloud():
         st.info("Use el boton 'Descargar' en el sidebar para obtener el proyecto corregido.")

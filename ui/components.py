@@ -129,7 +129,19 @@ def render_summary_metrics(result: AnalysisResult):
     critical = sum(1 for r in result.recommendations if r.severity == Severity.CRITICAL)
     warning = sum(1 for r in result.recommendations if r.severity == Severity.WARNING)
     info = sum(1 for r in result.recommendations if r.severity == Severity.INFO)
-    fixable = sum(1 for r in result.recommendations if r.fixable)
+
+    # Auto-fix count: prefer live FixerEngine scan from session_state when
+    # available so the sidebar matches the Auto-Fix tab card. Fall back to
+    # recommendation.fixable before the user runs a scan.
+    scan_key = f"scan_{result.report_path}"
+    scans = st.session_state.get(scan_key)
+    if scans is not None:
+        fixable = sum(
+            1 for s in scans
+            if s.issues_found > 0 and not getattr(s, "is_manual", False)
+        )
+    else:
+        fixable = sum(1 for r in result.recommendations if r.fixable)
 
     st.sidebar.markdown("#### Problemas")
 
