@@ -61,16 +61,11 @@ def _extract_zip(uploaded_file) -> str:
 
 
 def _create_download_zip(base_path: str) -> bytes:
-    """Create a ZIP from a directory for download."""
-    import io
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for root, _, files in os.walk(base_path):
-            for f in files:
-                fpath = os.path.join(root, f)
-                arcname = os.path.relpath(fpath, os.path.dirname(base_path))
-                zf.write(fpath, arcname)
-    return buf.getvalue()
+    """Create a ZIP from a directory for download — delegates to the
+    Auto-Fix tab builder so the same exclusion filter applies (skips .bak*,
+    __pycache__, OS metadata, etc.)."""
+    from ui.tab_fixer import _build_project_zip
+    return _build_project_zip(base_path)
 
 
 # ── Sidebar ──────────────────────────────────────────────────────────
