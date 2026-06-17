@@ -95,7 +95,7 @@ class TMDLParser:
                 continue
             col = {
                 "name": cm.group(1),
-                "dataType": "string",
+                "dataType": "",  # empty = unknown; only filled when declared
                 "isHidden": False,
                 "type": "data",
                 "summarizeBy": "none",
@@ -104,6 +104,15 @@ class TMDLParser:
             dt = re.search(r"dataType:\s*(\w+)", block)
             if dt:
                 col["dataType"] = dt.group(1)
+            else:
+                # Infer from formatString when possible: numeric formats imply
+                # numeric type. Avoids treating Field Parameter '*Orden' columns
+                # (which omit dataType) as strings.
+                fs_match = re.search(r"formatString:\s*(.+)", block)
+                if fs_match:
+                    fs = fs_match.group(1).strip().lower()
+                    if any(c.isdigit() or c in "#0.," for c in fs):
+                        col["dataType"] = "int64"
             # Hidden
             if re.search(r"^\s+isHidden\s*$", block, re.MULTILINE):
                 col["isHidden"] = True
@@ -123,6 +132,21 @@ class TMDLParser:
 
             table["columns"].append(col)
 
+        # Pre-pass: map measure name -> /// description that precedes it.
+        # In TMDL, descriptions are triple-slash comments above the object,
+        # NOT a `description:` property.
+        triple_slash_desc = {}
+        pending_comments = []
+        for ln in content.split("\n"):
+            stripped = ln.lstrip()
+            if stripped.startswith("///"):
+                pending_comments.append(stripped[3:].strip())
+                continue
+            mm_pre = re.match(r"^\tmeasure\s+'([^']+)'", ln)
+            if mm_pre and pending_comments:
+                triple_slash_desc[mm_pre.group(1)] = " ".join(pending_comments).strip()
+            pending_comments = []
+
         # Extract measures
         measure_blocks = re.split(r"(?=^\tmeasure\s+')", content, flags=re.MULTILINE)
         for block in measure_blocks:
@@ -134,15 +158,22 @@ class TMDLParser:
             measure = {
                 "name": mm.group(1),
                 "expression": mm.group(2).strip(),
-                "description": "",
+                "description": triple_slash_desc.get(mm.group(1), ""),
                 "formatString": "",
+                "displayFolder": "",
             }
-            desc = re.search(r"description:\s*(.+)", block)
-            if desc:
-                measure["description"] = desc.group(1).strip()
+            # Legacy: also pick up `description:` property if present (invalid TMDL
+            # but historical files may still have it).
+            if not measure["description"]:
+                desc = re.search(r"description:\s*(.+)", block)
+                if desc:
+                    measure["description"] = desc.group(1).strip()
             fs = re.search(r"formatString:\s*(.+)", block)
             if fs:
                 measure["formatString"] = fs.group(1).strip()
+            df = re.search(r"displayFolder:\s*(.+)", block)
+            if df:
+                measure["displayFolder"] = df.group(1).strip()
             table["measures"].append(measure)
 
         # Check for calculated table
