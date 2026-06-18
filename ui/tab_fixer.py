@@ -494,9 +494,14 @@ def _render_fixer_item(sr, engine, result, scan_key):
     what = explanation.get("what", "")
     action = explanation.get("action", "")
 
-    # Build expander label
+    # Track applied state per fixer in this session
+    applied_key = f"applied_{result.report_path}_{sr.fixer_id}"
+    was_applied = st.session_state.get(applied_key, False)
+
+    # Build expander label with applied badge
     tag = " [manual]" if is_manual else ""
-    label = f"{sr.fixer_name} — {sr.issues_found}{tag}"
+    applied_badge = " ✓ Aplicado" if was_applied else ""
+    label = f"{sr.fixer_name} — {sr.issues_found}{tag}{applied_badge}"
 
     with st.expander(label):
         # ── Explanation block ───────────────────────────────────
@@ -527,8 +532,11 @@ def _render_fixer_item(sr, engine, result, scan_key):
         # ── Action ──────────────────────────────────────────────
         if not is_manual and result.file_type == FileType.PBIP:
             st.markdown("")
-            if st.button("Corregir", key=f"fix_{sr.fixer_id}"):
-                _apply_fix(engine, sr, result, scan_key)
+            # Show success indicator if already applied
+            if was_applied:
+                st.success("✓ Este fix ya fue aplicado en esta sesión")
+            if st.button("Corregir", key=f"fix_{sr.fixer_id}", disabled=was_applied):
+                _apply_fix(engine, sr, result, scan_key, applied_key)
 
 
 def _apply_all_fixes(engine, auto_fixable, result, scan_key):
@@ -584,6 +592,11 @@ def _apply_all_fixes(engine, auto_fixable, result, scan_key):
     if failed:
         st.error(f"Fallidos: {failed}")
 
+    # Mark all auto-fixable as applied in this session
+    for sr in auto_fixable:
+        applied_key = f"applied_{result.report_path}_{sr.fixer_id}"
+        st.session_state[applied_key] = True
+
     with st.spinner("Re-analizando..."):
         active = _reanalyze_and_rescan(engine, result, scan_key)
 
@@ -634,7 +647,7 @@ def _render_post_fix_validation(result):
         st.warning(f"Validacion: {len(validation.soft)} advertencia(s) no bloqueante(s).")
 
 
-def _apply_fix(engine, sr, result, scan_key):
+def _apply_fix(engine, sr, result, scan_key, applied_key=None):
     if not is_cloud():
         with st.spinner("Creando backup..."):
             try:
@@ -659,6 +672,10 @@ def _apply_fix(engine, sr, result, scan_key):
             f"Parcial: {fr.issues_fixed}/{fr.issues_found} corregidos. "
             f"{val.get('issues_remaining', '?')} restantes."
         )
+
+    # Mark as applied in this session
+    if applied_key:
+        st.session_state[applied_key] = True
 
     with st.spinner("Re-analizando..."):
         active = _reanalyze_and_rescan(engine, result, scan_key)
