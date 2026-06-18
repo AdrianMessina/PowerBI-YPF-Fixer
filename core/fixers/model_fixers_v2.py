@@ -152,7 +152,6 @@ class FixCalendarTable(BaseFixer):
 \t\tdataType: int64
 \t\tlineageTag: {monthnum-lineage-tag}
 \t\tsummarizeBy: none
-\t\tsortByColumn: 'Month Number'
 \t\tsourceColumn: [Month Number]
 
 \tcolumn 'Month Name'
