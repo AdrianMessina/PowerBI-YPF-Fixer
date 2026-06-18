@@ -585,13 +585,53 @@ def _apply_all_fixes(engine, auto_fixable, result, scan_key):
         st.error(f"Fallidos: {failed}")
 
     with st.spinner("Re-analizando..."):
-        _reanalyze_and_rescan(engine, result, scan_key)
+        active = _reanalyze_and_rescan(engine, result, scan_key)
+
+    _render_post_fix_validation(active)
 
     if is_cloud():
         st.info("Use 'Descargar ZIP corregido' arriba para obtener el proyecto.")
     else:
         st.info("Recargue el proyecto en Power BI Desktop para ver los cambios.")
     st.rerun()
+
+
+def _render_post_fix_validation(result):
+    """Run schema validator on the fixed project; surface blocking issues
+    BEFORE the user downloads/opens in Power BI Desktop."""
+    try:
+        from core.validators import PBIRValidator
+    except Exception:
+        return
+    report_base = getattr(result, "_report_base_path", None)
+    model_base = getattr(result, "_model_base_path", None)
+    if not report_base and not model_base:
+        return
+    try:
+        validation = PBIRValidator(report_base, model_base).validate()
+    except Exception as e:
+        st.caption(f"Validador no pudo correr: {e}")
+        return
+
+    if validation.is_clean:
+        st.success("Validacion de schema: OK. El proyecto deberia abrir en Power BI Desktop sin errores.")
+        return
+
+    if validation.blocking:
+        st.error(
+            f"Validacion encontro {len(validation.blocking)} problema(s) bloqueante(s). "
+            f"Power BI Desktop va a rechazar este proyecto al abrirlo."
+        )
+        with st.expander(f"Ver {len(validation.blocking)} bloqueantes", expanded=True):
+            for i in validation.blocking[:30]:
+                loc = f"{i.file}:{i.line}" if i.line else i.file
+                st.markdown(f"- `{loc}` — {i.message}")
+                if i.hint:
+                    st.caption(f"  Sugerencia: {i.hint}")
+            if len(validation.blocking) > 30:
+                st.caption(f"... y {len(validation.blocking) - 30} mas")
+    if validation.soft:
+        st.warning(f"Validacion: {len(validation.soft)} advertencia(s) no bloqueante(s).")
 
 
 def _apply_fix(engine, sr, result, scan_key):
@@ -621,7 +661,9 @@ def _apply_fix(engine, sr, result, scan_key):
         )
 
     with st.spinner("Re-analizando..."):
-        _reanalyze_and_rescan(engine, result, scan_key)
+        active = _reanalyze_and_rescan(engine, result, scan_key)
+
+    _render_post_fix_validation(active)
 
     if is_cloud():
         st.info("Use el boton 'Descargar' en el sidebar para obtener el proyecto corregido.")
