@@ -172,7 +172,8 @@ class FixCalendarTable(BaseFixer):
 
 \tpartition Calendar = calculated
 \t\tmode: import
-\t\tsource = ''' + CALENDAR_DAX
+\t\tsource =
+\t\t\t''' + CALENDAR_DAX
 
     def scan(self):
         has_calendar = False
