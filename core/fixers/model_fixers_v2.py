@@ -301,6 +301,375 @@ class FixCalendarTable(BaseFixer):
             return
 
 
+class FixCalendarRelationships(BaseFixer):
+    """Auto-create relationships between Calendar table and fact tables."""
+
+    fixer_id = "fix_calendar_relationships"
+    name = "Crear relaciones con tabla Calendar"
+    description = (
+        "Detecta columnas de fecha en tablas de hechos y crea relaciones automáticas "
+        "con la tabla Calendar. Marca Calendar[Date] como columna de fecha principal."
+    )
+    category = "model"
+    severity = "info"
+    requires_pbip = True
+
+    FACT_TABLE_PREFIXES = ("fct_", "fact_", "dim_")
+    DATE_COLUMN_NAMES = ("fecha", "date", "fechakey", "datekey", "timestamp")
+
+    def scan(self):
+        # Check if Calendar table exists
+        has_calendar = False
+        model = self.result._raw_model_data
+        model_data = model.get("model", model)
+
+        for table in model_data.get("tables", []):
+            if table.get("isSystemTable", False):
+                continue
+            tname = table.get("name", "").lower().replace(" ", "").replace("_", "")
+            if tname in ("calendar", "calendario", "date", "fecha"):
+                has_calendar = True
+                break
+
+        if not has_calendar:
+            self.issues.append(
+                "No se detectó tabla Calendar. Ejecutá primero 'Generar tabla Calendario'."
+            )
+            return
+
+        # Find date columns in fact tables
+        date_columns = []
+        for table in model_data.get("tables", []):
+            if table.get("isSystemTable", False):
+                continue
+            tname = table.get("name", "")
+            # Check if it's a fact table
+            if not any(tname.lower().startswith(p) for p in self.FACT_TABLE_PREFIXES):
+                continue
+
+            for col in table.get("columns", []):
+                cname = col.get("name", "").lower()
+                ctype = col.get("dataType", "")
+                if ctype == "dateTime" and any(dt in cname for dt in self.DATE_COLUMN_NAMES):
+                    date_columns.append((tname, col.get("name")))
+
+        if not date_columns:
+            self.issues.append(
+                "No se detectaron columnas de fecha en tablas de hechos para relacionar."
+            )
+            return
+
+        # Check which relationships already exist
+        existing_rels = set()
+        for rel in model_data.get("relationships", []):
+            from_t = rel.get("fromTable", "")
+            from_c = rel.get("fromColumn", "")
+            existing_rels.add((from_t, from_c))
+
+        for tname, cname in date_columns:
+            if (tname, cname) not in existing_rels:
+                self.issues.append(
+                    f"Crear relación: {tname}[{cname}] → Calendar[Date]"
+                )
+
+    def fix(self):
+        if not self.issues:
+            self.scan()
+        if not self.issues:
+            return
+
+        import uuid
+        model_def = self._get_model_definition_path()
+        rels_file = os.path.join(model_def, "relationships.tmdl")
+
+        # For TMDL format
+        if os.path.isdir(model_def):
+            # Find date columns to relate
+            model = self.result._raw_model_data
+            model_data = model.get("model", model)
+
+            date_columns = []
+            for table in model_data.get("tables", []):
+                if table.get("isSystemTable", False):
+                    continue
+                tname = table.get("name", "")
+                if not any(tname.lower().startswith(p) for p in self.FACT_TABLE_PREFIXES):
+                    continue
+
+                for col in table.get("columns", []):
+                    cname = col.get("name", "")
+                    ctype = col.get("dataType", "")
+                    if ctype == "dateTime" and any(dt in cname.lower() for dt in self.DATE_COLUMN_NAMES):
+                        date_columns.append((tname, cname))
+
+            # Read existing relationships
+            existing_content = ""
+            if os.path.exists(rels_file):
+                with open(rels_file, "r", encoding="utf-8") as f:
+                    existing_content = f.read()
+
+            # Append new relationships
+            new_rels = []
+            for tname, cname in date_columns:
+                rel_name = f"rel_{tname}_{cname}_Calendar"
+                if rel_name not in existing_content:
+                    new_rels.append(f"""
+relationship {rel_name}
+\tfromColumn: {tname}.{cname}
+\ttoColumn: Calendar.Date
+""")
+
+            if new_rels:
+                with open(rels_file, "a", encoding="utf-8") as f:
+                    f.write("\n".join(new_rels))
+                self.fixes_applied.append(
+                    f"Creadas {len(new_rels)} relaciones con Calendar table en TMDL"
+                )
+                return
+
+        # For BIM format
+        for bim_name in ("model.bim", "dataset.bim"):
+            bim_path = os.path.join(model_def, bim_name)
+            if not os.path.exists(bim_path):
+                bim_path = os.path.join(self.result._model_base_path, bim_name)
+            if not os.path.exists(bim_path):
+                continue
+
+            data = self._read_json_file(bim_path)
+            if not data:
+                continue
+            model = data.get("model", data)
+
+            # Find date columns
+            date_columns = []
+            for table in model.get("tables", []):
+                if table.get("isSystemTable", False):
+                    continue
+                tname = table.get("name", "")
+                if not any(tname.lower().startswith(p) for p in self.FACT_TABLE_PREFIXES):
+                    continue
+
+                for col in table.get("columns", []):
+                    cname = col.get("name", "")
+                    ctype = col.get("dataType", "")
+                    if ctype == "dateTime" and any(dt in cname.lower() for dt in self.DATE_COLUMN_NAMES):
+                        date_columns.append((tname, cname))
+
+            # Create relationships
+            if "relationships" not in model:
+                model["relationships"] = []
+
+            new_count = 0
+            for tname, cname in date_columns:
+                # Check if relationship already exists
+                exists = any(
+                    r.get("fromTable") == tname and r.get("fromColumn") == cname
+                    for r in model["relationships"]
+                )
+                if not exists:
+                    model["relationships"].append({
+                        "name": f"rel_{tname}_{cname}_Calendar",
+                        "fromTable": tname,
+                        "fromColumn": cname,
+                        "toTable": "Calendar",
+                        "toColumn": "Date",
+                    })
+                    new_count += 1
+
+            if new_count > 0:
+                self._write_json_file(bim_path, data)
+                self.fixes_applied.append(
+                    f"Creadas {new_count} relaciones con Calendar table en BIM"
+                )
+            return
+
+
+class FixTimeIntelligenceMeasures(BaseFixer):
+    """Generate Time Intelligence measures for existing measures."""
+
+    fixer_id = "fix_time_intelligence_measures"
+    name = "Generar medidas Time Intelligence"
+    description = (
+        "Genera medidas de Time Intelligence (YTD, Prior Year, MTD, YoY%) "
+        "para las medidas principales del modelo. Requiere tabla Calendar."
+    )
+    category = "model"
+    severity = "info"
+    requires_pbip = True
+    is_manual = True
+
+    # Common measure patterns to detect
+    MEASURE_PATTERNS = ("total", "sum", "promedio", "average", "count", "cantidad")
+
+    def scan(self):
+        # Check if Calendar table exists
+        has_calendar = False
+        model = self.result._raw_model_data
+        model_data = model.get("model", model)
+
+        for table in model_data.get("tables", []):
+            if table.get("isSystemTable", False):
+                continue
+            tname = table.get("name", "").lower().replace(" ", "").replace("_", "")
+            if tname in ("calendar", "calendario", "date", "fecha"):
+                has_calendar = True
+                break
+
+        if not has_calendar:
+            self.issues.append(
+                "No se detectó tabla Calendar. Ejecutá primero 'Generar tabla Calendario'."
+            )
+            return
+
+        # Find main measures
+        main_measures = []
+        for measure in self.result.measures_detail:
+            mname_lower = measure.name.lower()
+            if any(pattern in mname_lower for pattern in self.MEASURE_PATTERNS):
+                # Skip if it's already a TI measure
+                if any(suffix in mname_lower for suffix in ("ytd", "mtd", "py", "yoy", "mom")):
+                    continue
+                main_measures.append(measure.name)
+
+        if not main_measures:
+            self.issues.append(
+                "No se detectaron medidas principales para generar Time Intelligence."
+            )
+            return
+
+        self.issues.append(
+            f"Se generarán medidas TI para: {', '.join(main_measures[:5])}"
+            + (f" y {len(main_measures) - 5} más..." if len(main_measures) > 5 else "")
+        )
+
+    def fix(self):
+        if not self.issues:
+            self.scan()
+        if "No se detectó tabla Calendar" in str(self.issues):
+            self.fixes_applied.append("MANUAL: Crear tabla Calendar primero")
+            return
+        if "No se detectaron medidas" in str(self.issues):
+            self.fixes_applied.append("MANUAL: No hay medidas principales")
+            return
+
+        import uuid
+        model_def = self._get_model_definition_path()
+
+        # Find main measures
+        main_measures = []
+        for measure in self.result.measures_detail:
+            mname_lower = measure.name.lower()
+            if any(pattern in mname_lower for pattern in self.MEASURE_PATTERNS):
+                if any(suffix in mname_lower for suffix in ("ytd", "mtd", "py", "yoy", "mom")):
+                    continue
+                main_measures.append(measure.name)
+
+        # Generate TI measures for TMDL
+        tables_dir = os.path.join(model_def, "tables")
+        if os.path.isdir(tables_dir):
+            ti_table_path = os.path.join(tables_dir, "_Time Intelligence.tmdl")
+
+            measures_tmdl = [f"table '_Time Intelligence'\n\tlineageTag: {uuid.uuid4()}\n"]
+
+            for mname in main_measures:
+                # YTD
+                measures_tmdl.append(f"""
+\tmeasure '{mname} YTD' = TOTALYTD([{mname}], Calendar[Date])
+\t\tlineageTag: {uuid.uuid4()}
+\t\tformatString: #,0
+""")
+                # Prior Year
+                measures_tmdl.append(f"""
+\tmeasure '{mname} PY' = CALCULATE([{mname}], SAMEPERIODLASTYEAR(Calendar[Date]))
+\t\tlineageTag: {uuid.uuid4()}
+\t\tformatString: #,0
+""")
+                # YoY %
+                measures_tmdl.append(f"""
+\tmeasure '{mname} YoY %' =
+\t\tVAR CurrentValue = [{mname}]
+\t\tVAR PriorValue = [{mname} PY]
+\t\tRETURN
+\t\tDIVIDE(CurrentValue - PriorValue, PriorValue)
+\t\tlineageTag: {uuid.uuid4()}
+\t\tformatString: 0.0%;-0.0%;0.0%
+""")
+
+            with open(ti_table_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(measures_tmdl))
+
+            self.fixes_applied.append(
+                f"Creadas {len(main_measures) * 3} medidas Time Intelligence en tabla '_Time Intelligence'"
+            )
+            return
+
+        # For BIM format
+        for bim_name in ("model.bim", "dataset.bim"):
+            bim_path = os.path.join(model_def, bim_name)
+            if not os.path.exists(bim_path):
+                bim_path = os.path.join(self.result._model_base_path, bim_name)
+            if not os.path.exists(bim_path):
+                continue
+
+            data = self._read_json_file(bim_path)
+            if not data:
+                continue
+            model = data.get("model", data)
+            tables = model.get("tables", [])
+
+            # Find or create _Time Intelligence table
+            ti_table = None
+            for table in tables:
+                if table.get("name") == "_Time Intelligence":
+                    ti_table = table
+                    break
+
+            if not ti_table:
+                ti_table = {
+                    "name": "_Time Intelligence",
+                    "columns": [],
+                    "measures": [],
+                }
+                tables.append(ti_table)
+
+            if "measures" not in ti_table:
+                ti_table["measures"] = []
+
+            # Generate TI measures
+            new_count = 0
+            for mname in main_measures:
+                # YTD
+                ti_table["measures"].append({
+                    "name": f"{mname} YTD",
+                    "expression": f"TOTALYTD([{mname}], Calendar[Date])",
+                    "formatString": "#,0",
+                })
+                # Prior Year
+                ti_table["measures"].append({
+                    "name": f"{mname} PY",
+                    "expression": f"CALCULATE([{mname}], SAMEPERIODLASTYEAR(Calendar[Date]))",
+                    "formatString": "#,0",
+                })
+                # YoY %
+                ti_table["measures"].append({
+                    "name": f"{mname} YoY %",
+                    "expression": [
+                        f"VAR CurrentValue = [{mname}]",
+                        f"VAR PriorValue = [{mname} PY]",
+                        "RETURN",
+                        "DIVIDE(CurrentValue - PriorValue, PriorValue)",
+                    ],
+                    "formatString": "0.0%;-0.0%;0.0%",
+                })
+                new_count += 3
+
+            self._write_json_file(bim_path, data)
+            self.fixes_applied.append(
+                f"Creadas {new_count} medidas Time Intelligence en BIM"
+            )
+            return
+
+
 class FixMeasureTable(BaseFixer):
     """Create an empty '_Measures' table with a Last Refresh timestamp measure."""
 

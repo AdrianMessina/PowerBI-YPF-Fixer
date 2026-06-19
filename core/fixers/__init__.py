@@ -24,6 +24,8 @@ from core.fixers.model_fixers_v2 import (
     FixInactiveRelationships,
     FixAutoDateTime,
     FixCalendarTable,
+    FixCalendarRelationships,
+    FixTimeIntelligenceMeasures,
     FixMeasureTable,
     FixTimeIntelligenceGroup,
     FixUnitsCalcGroup,
@@ -47,7 +49,7 @@ from core.fixers.bpa_fixers_v2 import (
     FixDataCategoryGeo,
 )
 
-# Register all fixers (32 total)
+# Register all fixers (34 total)
 ALL_FIXERS = [
     # ── Report fixers (11) ──────────────────────────────────────
     FixPieCharts,
@@ -61,12 +63,14 @@ ALL_FIXERS = [
     FixVisualTabOrder,
     FixLargeCardCount,
     FixSlicerSync,
-    # ── Model fixers (7) ────────────────────────────────────────
+    # ── Model fixers (9) ────────────────────────────────────────
     FixBidirectionalRelationships,
     FixCalculatedColumnsToMeasures,
     FixInactiveRelationships,
     FixAutoDateTime,
     FixCalendarTable,
+    FixCalendarRelationships,
+    FixTimeIntelligenceMeasures,
     FixMeasureTable,
     FixTimeIntelligenceGroup,
     FixUnitsCalcGroup,
