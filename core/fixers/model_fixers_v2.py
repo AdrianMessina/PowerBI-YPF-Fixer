@@ -115,20 +115,21 @@ class FixCalendarTable(BaseFixer):
         "dim_calendar", "dim_calendario", "datetable", "dates",
     }
 
-    CALENDAR_DAX = '''ADDCOLUMNS(
-    CALENDAR(DATE(2020, 1, 1), DATE(2030, 12, 31)),
-    "Year", YEAR([Date]),
-    "Month Number", MONTH([Date]),
-    "Month Name", FORMAT([Date], "MMMM"),
-    "Month Short", FORMAT([Date], "MMM"),
-    "Quarter", "Q" & FORMAT([Date], "Q"),
-    "Year-Month", FORMAT([Date], "YYYY-MM"),
-    "Day of Week", WEEKDAY([Date], 2),
-    "Day Name", FORMAT([Date], "DDDD"),
-    "Week Number", WEEKNUM([Date], 2),
-    "Is Weekend", IF(WEEKDAY([Date], 2) >= 6, TRUE(), FALSE()),
-    "Year-Quarter", FORMAT([Date], "YYYY") & "-Q" & FORMAT([Date], "Q")
-)'''
+    CALENDAR_DAX = '''
+\t\t\t\tADDCOLUMNS(
+\t\t\t\t\tCALENDAR(DATE(2020, 1, 1), DATE(2030, 12, 31)),
+\t\t\t\t\t"Year", YEAR([Date]),
+\t\t\t\t\t"Month Number", MONTH([Date]),
+\t\t\t\t\t"Month Name", FORMAT([Date], "MMMM"),
+\t\t\t\t\t"Month Short", FORMAT([Date], "MMM"),
+\t\t\t\t\t"Quarter", "Q" & FORMAT([Date], "Q"),
+\t\t\t\t\t"Year-Month", FORMAT([Date], "YYYY-MM"),
+\t\t\t\t\t"Day of Week", WEEKDAY([Date], 2),
+\t\t\t\t\t"Day Name", FORMAT([Date], "DDDD"),
+\t\t\t\t\t"Week Number", WEEKNUM([Date], 2),
+\t\t\t\t\t"Is Weekend", IF(WEEKDAY([Date], 2) >= 6, TRUE(), FALSE()),
+\t\t\t\t\t"Year-Quarter", FORMAT([Date], "YYYY") & "-Q" & FORMAT([Date], "Q")
+\t\t\t\t)'''
 
     CALENDAR_TMDL = '''table Calendar
 \tlineageTag: {cal-lineage-tag}
