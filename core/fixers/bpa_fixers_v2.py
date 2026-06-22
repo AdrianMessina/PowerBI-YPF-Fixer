@@ -455,3 +455,217 @@ class FixDataCategoryGeo(BaseFixer):
             self.scan()
             for issue in self.issues:
                 self.fixes_applied.append(f"SUGERENCIA: {issue}")
+
+
+class FixRLSPerformance(BaseFixer):
+    """Detect Row-Level Security anti-patterns that hurt performance or security."""
+
+    fixer_id = "fix_rls_performance"
+    name = "Detectar anti-patrones de RLS"
+    description = (
+        "Analiza roles de Row-Level Security (RLS) y detecta anti-patrones: "
+        "USERNAME() en lugar de USERPRINCIPALNAME(), 'Default Allow' (TRUE()), "
+        "LOOKUPVALUE en filtros, RLS sobre tablas fact grandes, "
+        "y relaciones bi-direccionales que cruzan tablas con RLS. "
+        "Detección únicamente — los fixes requieren revisión manual de seguridad."
+    )
+    category = "bpa"
+    severity = "warning"
+    requires_pbip = True
+    is_manual = True
+    detection_method = "pattern_match"
+
+    # Heuristic: name fragments commonly seen in fact tables
+    FACT_TABLE_HINTS = ("fact", "fct_", "f_", "transaction", "ventas", "movimiento", "ledger", "sales")
+
+    def scan(self):
+        roles = self._collect_roles()
+        if not roles:
+            return
+
+        fact_tables = self._guess_fact_tables()
+        bidir_tables = self._tables_with_bidirectional_relationships()
+
+        for role in roles:
+            rname = role["name"]
+            for tperm in role["tablePermissions"]:
+                tname = tperm["table"]
+                expr = tperm["expression"] or ""
+                expr_compact = re.sub(r"\s+", " ", expr).strip()
+
+                # 1) Default Allow — TRUE() as filter (security hole)
+                if re.fullmatch(r"\s*TRUE\s*\(\s*\)\s*", expr, re.IGNORECASE):
+                    self.issues.append(
+                        f"[CRITICO][{rname}/{tname}] 'Default Allow' detectado: "
+                        f"filtro = TRUE(). Cualquiera con el rol ve todos los datos. "
+                        f"Use FALSE() como default o un filtro explicito."
+                    )
+
+                # 2) USERNAME() instead of USERPRINCIPALNAME() — cloud anti-pattern
+                if re.search(r"\bUSERNAME\s*\(", expr, re.IGNORECASE) and \
+                   not re.search(r"\bUSERPRINCIPALNAME\s*\(", expr, re.IGNORECASE):
+                    self.issues.append(
+                        f"[{rname}/{tname}] Usa USERNAME(): en Power BI Service devuelve UPN, "
+                        f"pero en Desktop devuelve DOMAIN\\User. Use USERPRINCIPALNAME() "
+                        f"para consistencia cloud y soporte B2B."
+                    )
+
+                # 3) LOOKUPVALUE — should use relationship instead
+                if re.search(r"\bLOOKUPVALUE\s*\(", expr, re.IGNORECASE):
+                    self.issues.append(
+                        f"[{rname}/{tname}] LOOKUPVALUE en RLS: lento por ejecutarse por fila. "
+                        f"Reemplace por relacion entre tabla de seguridad y tabla filtrada."
+                    )
+
+                # 4) Complex filter with CALCULATE/FILTER nesting — suggest security table
+                has_calc = bool(re.search(r"\bCALCULATE\s*\(", expr, re.IGNORECASE))
+                has_filter = bool(re.search(r"\bFILTER\s*\(", expr, re.IGNORECASE))
+                if has_calc and has_filter:
+                    self.issues.append(
+                        f"[{rname}/{tname}] Filtro complejo (CALCULATE+FILTER): considere "
+                        f"patron de tabla de seguridad con relacion en lugar de logica DAX."
+                    )
+
+                # 5) RLS on fact table — should be on dimension and propagate
+                if self._looks_like_fact_table(tname, fact_tables):
+                    self.issues.append(
+                        f"[{rname}/{tname}] RLS aplicado sobre tabla fact: lento en tablas grandes. "
+                        f"Aplique el filtro en la dimension correspondiente y deje que se propague."
+                    )
+
+                # 6) Bi-directional relationship touches the filtered table
+                if tname in bidir_tables:
+                    self.issues.append(
+                        f"[{rname}/{tname}] Tabla con relacion bi-direccional + RLS: "
+                        f"penalizacion de 5-10x en performance. Use relacion unidireccional."
+                    )
+
+    def fix(self):
+        # Manual fixer: emit each issue as a suggestion, no file writes.
+        if not self.issues:
+            self.scan()
+        for issue in self.issues:
+            self.fixes_applied.append(f"SUGERENCIA: {issue}")
+
+    # ── Helpers ──────────────────────────────────────────────────────
+
+    def _collect_roles(self) -> list:
+        """Return [{name, tablePermissions: [{table, expression}]}] from TMDL or BIM."""
+        roles = []
+
+        # BIM
+        model = self.result._raw_model_data or {}
+        model_data = model.get("model", model)
+        for r in model_data.get("roles", []) or []:
+            tps = []
+            for tp in r.get("tablePermissions", []) or []:
+                tps.append({
+                    "table": tp.get("name", ""),
+                    "expression": tp.get("filterExpression", "") or "",
+                })
+            roles.append({"name": r.get("name", ""), "tablePermissions": tps})
+
+        if roles:
+            return roles
+
+        # TMDL: roles can live under definition/roles/*.tmdl
+        model_def = self._get_model_definition_path()
+        roles_dir = os.path.join(model_def, "roles")
+        if not os.path.isdir(roles_dir):
+            return roles
+
+        for fname in os.listdir(roles_dir):
+            if not fname.endswith(".tmdl"):
+                continue
+            try:
+                with open(os.path.join(roles_dir, fname), "r", encoding="utf-8") as f:
+                    content = f.read()
+            except Exception:
+                continue
+            roles.extend(self._parse_tmdl_roles(content))
+
+        return roles
+
+    @staticmethod
+    def _parse_tmdl_roles(content: str) -> list:
+        """Parse one or more `role ...` blocks from a TMDL file."""
+        out = []
+        # Split on top-level `role <name>` lines
+        role_blocks = re.split(r"(?m)^role\s+", content)
+        for block in role_blocks[1:]:  # first chunk before any `role` is preamble
+            name_match = re.match(r"'?([^'\n]+?)'?\s*\n", block)
+            if not name_match:
+                continue
+            rname = name_match.group(1).strip()
+            tps = []
+            # tablePermission <Table> = <expression up to next tablePermission or end>
+            # Expression can be inline (single line) or block (next indented lines).
+            tp_iter = re.finditer(
+                r"^\s*tablePermission\s+'?([^'=\n]+?)'?\s*=\s*(.*?)(?=^\s*tablePermission\s|\Z)",
+                block, re.MULTILINE | re.DOTALL,
+            )
+            for m in tp_iter:
+                tname = m.group(1).strip()
+                expr = m.group(2).strip()
+                # Strip role-level trailing metadata that may leak in (e.g. annotations)
+                expr = re.sub(r"\n\s*annotation\s.*$", "", expr, flags=re.DOTALL)
+                tps.append({"table": tname, "expression": expr})
+            out.append({"name": rname, "tablePermissions": tps})
+        return out
+
+    def _guess_fact_tables(self) -> set:
+        """Tables that look like facts by name OR by cardinality (>500k rows if known)."""
+        out = set()
+        model = self.result._raw_model_data or {}
+        model_data = model.get("model", model)
+        for table in self._iter_user_tables(model_data):
+            tname = table.get("name", "")
+            tname_lower = tname.lower()
+            if any(h in tname_lower for h in self.FACT_TABLE_HINTS):
+                out.add(tname)
+                continue
+            # Cardinality hint when present in cached metadata
+            row_count = table.get("rowCount") or 0
+            if isinstance(row_count, (int, float)) and row_count > 500_000:
+                out.add(tname)
+        return out
+
+    def _looks_like_fact_table(self, table_name: str, fact_tables: set) -> bool:
+        if table_name in fact_tables:
+            return True
+        tn = table_name.lower()
+        return any(h in tn for h in self.FACT_TABLE_HINTS)
+
+    def _tables_with_bidirectional_relationships(self) -> set:
+        """Tables that participate in a bi-directional relationship."""
+        out = set()
+        # Cached relationships
+        for rel in self.result.relationships_detail or []:
+            cross = (getattr(rel, "cross_filtering_behavior", "") or "").lower()
+            if "both" in cross:
+                for attr in ("from_table", "to_table"):
+                    val = getattr(rel, attr, None)
+                    if val:
+                        out.add(val)
+
+        if out:
+            return out
+
+        # TMDL fallback
+        model_def = self._get_model_definition_path()
+        rel_file = os.path.join(model_def, "relationships.tmdl")
+        if not os.path.exists(rel_file):
+            return out
+        try:
+            with open(rel_file, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception:
+            return out
+
+        blocks = re.split(r"(?m)^relationship\s", content)
+        for block in blocks[1:]:
+            if not re.search(r"crossFilteringBehavior:\s*bothDirections", block):
+                continue
+            for m in re.finditer(r"(?:fromColumn|toColumn):\s*'?([^'.\n]+)'?\.", block):
+                out.add(m.group(1).strip())
+        return out

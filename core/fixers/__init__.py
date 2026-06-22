@@ -47,9 +47,10 @@ from core.fixers.bpa_fixers_v2 import (
     FixMissingRelationships,
     FixSortByColumn,
     FixDataCategoryGeo,
+    FixRLSPerformance,
 )
 
-# Register all fixers (34 total)
+# Register all fixers (36 total)
 ALL_FIXERS = [
     # ── Report fixers (11) ──────────────────────────────────────
     FixPieCharts,
@@ -63,7 +64,7 @@ ALL_FIXERS = [
     FixVisualTabOrder,
     FixLargeCardCount,
     FixSlicerSync,
-    # ── Model fixers (9) ────────────────────────────────────────
+    # ── Model fixers (10) ───────────────────────────────────────
     FixBidirectionalRelationships,
     FixCalculatedColumnsToMeasures,
     FixInactiveRelationships,
@@ -74,7 +75,7 @@ ALL_FIXERS = [
     FixMeasureTable,
     FixTimeIntelligenceGroup,
     FixUnitsCalcGroup,
-    # ── BPA fixers (14) ─────────────────────────────────────────
+    # ── BPA fixers (15) ─────────────────────────────────────────
     FixDivideOperator,
     FixMeasureDescriptions,
     FixMeasureFormatStrings,
@@ -89,6 +90,7 @@ ALL_FIXERS = [
     FixMissingRelationships,
     FixSortByColumn,
     FixDataCategoryGeo,
+    FixRLSPerformance,
 ]
 
 __all__ = ["BaseFixer", "FixerEngine", "ALL_FIXERS"]
