@@ -239,6 +239,33 @@ class FixExpensiveDAXPatterns(BaseFixer):
             "message": "Contexto: revise si VALUES() necesita ser reemplazado por DISTINCT()",
             "id": "VALUES_CHECK",
         },
+        # ── Context transition patterns (iterator + measure / CALCULATE) ──
+        {
+            "pattern": (
+                r"(SUMX|AVERAGEX|COUNTX|MAXX|MINX|MEDIANX|PRODUCTX|RANKX|"
+                r"GEOMEANX|STDEVX|VARX)\s*\([^,]+,\s*CALCULATE\s*\("
+            ),
+            "exclude": None,
+            "message": (
+                "Transicion de contexto en iterador: CALCULATE() dentro de SUMX/AVERAGEX/etc "
+                "se ejecuta una vez por fila (10-100x mas lento). Considere reescribir con "
+                "CALCULATE() externo + agregacion simple."
+            ),
+            "id": "ITERATOR_CALCULATE",
+        },
+        {
+            "pattern": (
+                r"(SUMX|AVERAGEX|COUNTX|MAXX|MINX|MEDIANX|PRODUCTX|RANKX|"
+                r"GEOMEANX|STDEVX|VARX)\s*\([^,]+,\s*\[[^\]]+\]\s*\)"
+            ),
+            "exclude": None,
+            "message": (
+                "Posible transicion de contexto: medida referenciada dentro de un iterador "
+                "(SUMX(t, [Medida])). Si [Medida] es una MEDIDA, fuerza CALCULATE implicito "
+                "por fila (lento). Si es una columna, esta OK — verifique."
+            ),
+            "id": "ITERATOR_MEASURE_REF",
+        },
     ]
 
     def scan(self):
