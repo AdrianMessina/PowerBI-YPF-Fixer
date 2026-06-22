@@ -48,9 +48,10 @@ from core.fixers.bpa_fixers_v2 import (
     FixSortByColumn,
     FixDataCategoryGeo,
     FixRLSPerformance,
+    FixUnusedColumns,
 )
 
-# Register all fixers (36 total)
+# Register all fixers (37 total)
 ALL_FIXERS = [
     # ── Report fixers (11) ──────────────────────────────────────
     FixPieCharts,
@@ -75,7 +76,7 @@ ALL_FIXERS = [
     FixMeasureTable,
     FixTimeIntelligenceGroup,
     FixUnitsCalcGroup,
-    # ── BPA fixers (15) ─────────────────────────────────────────
+    # ── BPA fixers (16) ─────────────────────────────────────────
     FixDivideOperator,
     FixMeasureDescriptions,
     FixMeasureFormatStrings,
@@ -91,6 +92,7 @@ ALL_FIXERS = [
     FixSortByColumn,
     FixDataCategoryGeo,
     FixRLSPerformance,
+    FixUnusedColumns,
 ]
 
 __all__ = ["BaseFixer", "FixerEngine", "ALL_FIXERS"]

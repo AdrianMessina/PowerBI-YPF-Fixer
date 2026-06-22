@@ -696,3 +696,246 @@ class FixRLSPerformance(BaseFixer):
             for m in re.finditer(r"(?:fromColumn|toColumn):\s*'?([^'.\n]+)'?\.", block):
                 out.add(m.group(1).strip())
         return out
+
+
+class FixUnusedColumns(BaseFixer):
+    """Detect columns never referenced by measures, visuals, relationships, or RLS.
+
+    Estático: cruza columnas del modelo contra todas las fuentes de uso
+    detectables sin conexión al modelo. Reduce falsos positivos exigiendo
+    que la columna no aparezca en NINGUNA fuente.
+
+    NOTA: Es heurística. No detecta uso vía bookmarks, drillthrough custom,
+    ni columnas usadas únicamente como labels de slicers fuera del modelo.
+    Marca como manual.
+    """
+
+    fixer_id = "fix_unused_columns"
+    name = "Detectar columnas sin uso"
+    description = (
+        "Detecta columnas que no aparecen en ninguna medida DAX, visual, "
+        "relacion, filtro RLS, sortByColumn ni jerarquia. Las columnas sin "
+        "uso consumen memoria innecesariamente. Revisar antes de eliminar."
+    )
+    category = "bpa"
+    severity = "info"
+    requires_pbip = True
+    is_manual = True
+    detection_method = "heuristic"
+
+    # Columnas con estos nombres se asumen como ID/key y no se reportan
+    # (suelen ser referenciadas implícitamente por SDK/ofuscación de drillthrough)
+    KEY_NAME_HINTS = ("id", "key", "code", "sk", "pk", "fk", "uuid", "guid")
+
+    def scan(self):
+        # 1) Recolectar todas las columnas del modelo (excluyendo system tables)
+        all_columns = self._collect_user_columns()
+        if not all_columns:
+            return
+
+        # 2) Recolectar todos los textos donde una columna puede ser referenciada
+        all_refs = self._collect_all_references()
+
+        # 3) Recolectar columnas usadas en relaciones (from/to)
+        rel_columns = self._columns_in_relationships()
+
+        # 4) Recolectar columnas usadas como sortByColumn o en hierarchies (TMDL/BIM)
+        meta_columns = self._columns_in_metadata()
+
+        # 5) Para cada columna, decidir si es candidata a "sin uso"
+        for (table_name, col_name, is_hidden) in all_columns:
+            full_ref = f"{table_name}.{col_name}".lower()
+            if full_ref in rel_columns:
+                continue
+            if full_ref in meta_columns:
+                continue
+
+            # Patrones de referencia DAX
+            qualified = re.escape(f"{table_name}[{col_name}]")
+            qualified_quoted = re.escape(f"'{table_name}'[{col_name}]")
+            unqualified = re.escape(f"[{col_name}]")
+
+            pattern = (
+                rf"({qualified}|{qualified_quoted}|(?<![A-Za-z0-9_]){unqualified})"
+            )
+            if re.search(pattern, all_refs, re.IGNORECASE):
+                continue
+
+            # Ignorar nombres claramente de tipo key (alta tasa de FP)
+            col_lower = col_name.lower()
+            if any(h == col_lower or col_lower.endswith(h) for h in self.KEY_NAME_HINTS):
+                continue
+
+            hidden_tag = " (oculta)" if is_hidden else ""
+            self.issues.append(
+                f"[{table_name}] Columna '{col_name}'{hidden_tag}: sin referencias en "
+                f"medidas/visuales/relaciones/RLS. Candidata a eliminar."
+            )
+
+    def fix(self):
+        if not self.issues:
+            self.scan()
+        for issue in self.issues:
+            self.fixes_applied.append(f"REVISION: {issue}")
+
+    # ── Helpers ──────────────────────────────────────────────────────
+
+    def _collect_user_columns(self) -> list:
+        """Return [(table_name, column_name, is_hidden), ...] from BIM or TMDL."""
+        out = []
+        model = self.result._raw_model_data or {}
+        model_data = model.get("model", model)
+
+        # BIM path
+        for table in self._iter_user_tables(model_data):
+            tname = table.get("name", "")
+            for col in table.get("columns", []) or []:
+                cname = col.get("name", "")
+                if not cname or cname.startswith("RowNumber-"):
+                    continue
+                # Excluir columnas auto-generadas de Power BI (year/month/day variations)
+                if col.get("isSystem") or col.get("type") == "rowNumber":
+                    continue
+                out.append((tname, cname, bool(col.get("isHidden", False))))
+
+        if out:
+            return out
+
+        # TMDL fallback
+        for _, content, tname in self._iter_tmdl_table_files():
+            col_iter = re.finditer(
+                r"^\tcolumn\s+'?([^'\n=]+?)'?\s*(?:=|$)",
+                content, re.MULTILINE,
+            )
+            for m in col_iter:
+                cname = m.group(1).strip()
+                # is_hidden si el bloque de la columna contiene isHidden
+                # (búsqueda local en las siguientes 10 lineas)
+                start = m.end()
+                snippet = content[start:start + 500]
+                is_hidden = "isHidden" in snippet.split("\n\tcolumn ")[0]
+                out.append((tname, cname, is_hidden))
+
+        return out
+
+    def _collect_all_references(self) -> str:
+        """Concatena textos donde una columna puede ser referenciada."""
+        chunks = []
+
+        # Expresiones de medidas
+        for m in self.result.measures_detail or []:
+            if m.expression:
+                chunks.append(m.expression)
+
+        # Expresiones de columnas calculadas (pueden referenciar otras)
+        for col in self.result.calculated_columns_detail or []:
+            expr = getattr(col, "expression", "") or ""
+            if expr:
+                chunks.append(expr)
+
+        # Filtros RLS (TMDL roles + BIM)
+        chunks.extend(self._rls_expressions())
+
+        # Contenido de TODOS los visual.json (incluye bindings, queries, filtros)
+        try:
+            for visual_path, data, _, _ in self._iter_visual_files():
+                # Serializar el dict completo a texto para grep
+                import json
+                chunks.append(json.dumps(data, ensure_ascii=False))
+        except Exception:
+            pass
+
+        # Contenido de page.json (filtros a nivel pagina)
+        try:
+            for _, data, _ in self._iter_page_files():
+                import json
+                chunks.append(json.dumps(data, ensure_ascii=False))
+        except Exception:
+            pass
+
+        return " ".join(chunks)
+
+    def _rls_expressions(self) -> list:
+        """Devuelve todos los textos de filterExpression de roles RLS."""
+        out = []
+        model = self.result._raw_model_data or {}
+        model_data = model.get("model", model)
+        for r in model_data.get("roles", []) or []:
+            for tp in r.get("tablePermissions", []) or []:
+                expr = tp.get("filterExpression", "")
+                if expr:
+                    out.append(expr)
+
+        # TMDL
+        model_def = self._get_model_definition_path()
+        roles_dir = os.path.join(model_def, "roles")
+        if os.path.isdir(roles_dir):
+            for fname in os.listdir(roles_dir):
+                if fname.endswith(".tmdl"):
+                    try:
+                        with open(os.path.join(roles_dir, fname), "r", encoding="utf-8") as f:
+                            out.append(f.read())
+                    except Exception:
+                        pass
+        return out
+
+    def _columns_in_relationships(self) -> set:
+        """Devuelve {'table.column'} de columnas usadas en relaciones."""
+        out = set()
+        for rel in self.result.relationships_detail or []:
+            ft = getattr(rel, "from_table", "")
+            fc = getattr(rel, "from_column", "")
+            tt = getattr(rel, "to_table", "")
+            tc = getattr(rel, "to_column", "")
+            if ft and fc:
+                out.add(f"{ft}.{fc}".lower())
+            if tt and tc:
+                out.add(f"{tt}.{tc}".lower())
+        return out
+
+    def _columns_in_metadata(self) -> set:
+        """Columnas referenciadas como sortByColumn o como hierarchy member."""
+        out = set()
+        model = self.result._raw_model_data or {}
+        model_data = model.get("model", model)
+
+        # BIM: si una columna tiene sortByColumn, AMBAS estan en uso
+        # (la visible y la que ordena)
+        for table in self._iter_user_tables(model_data):
+            tname = table.get("name", "")
+            for col in table.get("columns", []) or []:
+                sort_by = col.get("sortByColumn", "")
+                if sort_by:
+                    out.add(f"{tname}.{sort_by}".lower())
+                    cname = col.get("name", "")
+                    if cname:
+                        out.add(f"{tname}.{cname}".lower())
+            for hier in table.get("hierarchies", []) or []:
+                for level in hier.get("levels", []) or []:
+                    lcol = level.get("column", "")
+                    if lcol:
+                        out.add(f"{tname}.{lcol}".lower())
+
+        # TMDL
+        for fpath, content, tname in self._iter_tmdl_table_files():
+            # Bloques de columna: ^\tcolumn 'Name' ... hasta proxima ^\tcolumn o EOF
+            col_blocks = re.split(r"(?m)^\tcolumn\s+", content)
+            for block in col_blocks[1:]:
+                # Nombre de la columna actual
+                cm = re.match(r"'?([^'\n=]+?)'?\s*(?:=|\n)", block)
+                if not cm:
+                    continue
+                cname = cm.group(1).strip()
+                # Si tiene sortByColumn dentro del bloque, ambas estan en uso
+                sb = re.search(r"sortByColumn:\s*'?([^'\n]+?)'?\s*$",
+                               block, re.MULTILINE)
+                if sb:
+                    out.add(f"{tname}.{cname}".lower())
+                    out.add(f"{tname}.{sb.group(1).strip()}".lower())
+
+            # Hierarchy levels: column: 'Col'
+            for m in re.finditer(r"^\s+column:\s*'?([^'\n]+?)'?\s*$",
+                                 content, re.MULTILINE):
+                out.add(f"{tname}.{m.group(1).strip()}".lower())
+
+        return out
