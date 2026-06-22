@@ -1,116 +1,91 @@
 """CML Launch Script — starts Streamlit on CDSW_APP_PORT.
 
-Cloudera AI corre la app detrás de un proxy Istio que espera la app
-escuchando en CDSW_APP_PORT (típicamente 8100) en 0.0.0.0. Si un
-restart deja un proceso zombie ocupando el puerto o el socket queda
-en TIME_WAIT, el nuevo arranque falla con 'Port X is not available'.
+Cloudera AI corre este script dentro de un kernel IPython. Si usamos
+subprocess.run(["streamlit", ...]) el kernel sigue vivo en el proceso
+padre y sus puertos ZMQ pueden chocar con CDSW_APP_PORT.
 
-Estrategia:
-  1. Diagnosticar quién tiene el puerto
-  2. Matar por PUERTO (no por nombre) — fuser/lsof son más confiables que pkill
-  3. Loop de espera: hasta 30s polleando el puerto hasta que esté libre
-  4. Recién ahí arrancar Streamlit
+La solucion correcta es os.execvp(): reemplaza la imagen del proceso
+actual (Python+kernel) con Streamlit, manteniendo el mismo PID.
+Cloudera ve el proceso vivo, los recursos del kernel se liberan, y
+Streamlit binde a CDSW_APP_PORT sin conflicto.
+
+Diagnostico fallback via /proc (no requiere lsof/ss/netstat — minimo
+en muchos contenedores de Cloudera).
 """
 
 import os
-import socket
-import subprocess
+import re
 import sys
-import time
 
 port = os.environ.get("CDSW_APP_PORT", "8501")
-port_int = int(port)
 
 
-def diagnose_port(p: int) -> None:
-    """Imprime quién tiene el puerto ocupado (best-effort)."""
-    for cmd in (["lsof", "-i", f":{p}"],
-                ["ss", "-tlnp", f"sport = :{p}"],
-                ["netstat", "-tlnp"]):
-        try:
-            out = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-            if out.stdout.strip():
-                print(f"[diag] {' '.join(cmd)}:")
-                print(out.stdout)
-                return
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+def diagnose_port_via_proc(p: int) -> None:
+    """Imprime quien tiene el puerto usando solo /proc (sin tools externos)."""
+    port_hex = format(p, "04X")
+    print(f"[diag] Buscando puerto {p} (=0x{port_hex}) en /proc/net/tcp")
+
+    inode_to_pid = {}
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
             continue
-    print(f"[diag] No se pudo diagnosticar el puerto {p} (lsof/ss/netstat no disponibles).")
-
-
-def kill_port(p: int) -> None:
-    """Mata procesos ocupando el puerto p, probando varios métodos."""
-    # Método 1: fuser (más directo)
-    try:
-        subprocess.run(["fuser", "-k", f"{p}/tcp"],
-                       check=False, capture_output=True, timeout=5)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-
-    # Método 2: lsof + kill (fallback)
-    try:
-        out = subprocess.run(["lsof", "-ti", f":{p}"],
-                             capture_output=True, text=True, timeout=5)
-        pids = [pid.strip() for pid in out.stdout.split() if pid.strip()]
-        for pid in pids:
+        fd_dir = f"/proc/{pid}/fd"
+        try:
+            fds = os.listdir(fd_dir)
+        except OSError:
+            continue
+        for fd in fds:
             try:
-                subprocess.run(["kill", "-9", pid], check=False, timeout=3)
-            except subprocess.TimeoutExpired:
-                pass
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+                link = os.readlink(f"{fd_dir}/{fd}")
+            except OSError:
+                continue
+            m = re.match(r"socket:\[(\d+)\]", link)
+            if m:
+                inode_to_pid[m.group(1)] = pid
 
-    # Método 3: pkill por nombre (catch-all)
     try:
-        subprocess.run(["pkill", "-9", "-f", "streamlit"], check=False, timeout=5)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+        with open("/proc/net/tcp") as f:
+            for line in f.readlines()[1:]:  # skip header
+                parts = line.split()
+                if len(parts) < 10:
+                    continue
+                local = parts[1]
+                if not local.endswith(f":{port_hex}"):
+                    continue
+                state = parts[3]
+                inode = parts[9]
+                pid = inode_to_pid.get(inode, "?")
+                cmdline = ""
+                if pid != "?":
+                    try:
+                        with open(f"/proc/{pid}/cmdline") as cf:
+                            cmdline = cf.read().replace("\x00", " ").strip()
+                    except OSError:
+                        pass
+                print(f"[diag]   local={local}  state={state}  pid={pid}  cmd={cmdline}")
+    except OSError as e:
+        print(f"[diag] No pude leer /proc/net/tcp: {e}")
 
 
-def is_port_free(p: int) -> bool:
-    """Devuelve True si el puerto p está libre para bindear."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        s.bind(("0.0.0.0", p))
-        return True
-    except OSError:
-        return False
-    finally:
-        s.close()
+print(f"[init] Preparando Streamlit en puerto {port}")
+try:
+    diagnose_port_via_proc(int(port))
+except Exception as e:
+    print(f"[diag] Falló el diagnóstico (no critico): {e}")
 
-
-def wait_for_port(p: int, timeout: int = 30) -> bool:
-    """Polleá el puerto cada 1s hasta `timeout` segundos."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if is_port_free(p):
-            return True
-        time.sleep(1)
-    return False
-
-
-# ── Limpieza pre-arranque ──
-print(f"[init] Limpiando puerto {port}...")
-diagnose_port(port_int)
-kill_port(port_int)
-time.sleep(2)
-
-if not wait_for_port(port_int, timeout=30):
-    print(f"[ERROR] Puerto {port} sigue ocupado despues de 30s. Estado actual:")
-    diagnose_port(port_int)
-    print("[ERROR] No se puede arrancar Streamlit. Hacé un Stop completo de la "
-          "app en Cloudera AI y volvé a Start (no solo Restart).")
-    sys.exit(1)
-
-print(f"[init] Puerto {port} libre. Arrancando Power BI Fixer...")
-
-subprocess.run([
+cmd = [
     "streamlit", "run", "app.py",
     f"--server.port={port}",
     # 0.0.0.0 para que el proxy Istio de Cloudera alcance al container.
     "--server.address=0.0.0.0",
     "--server.headless=true",
-    # enableCORS=false es incompatible con enableXsrfProtection=true (default).
     "--browser.gatherUsageStats=false",
-])
+]
+
+print(f"[init] Ejecutando: {' '.join(cmd)}")
+sys.stdout.flush()
+
+# execvp REEMPLAZA el proceso actual (incluyendo el kernel IPython).
+# Esto libera los puertos que tenia tomados Python y deja a Streamlit
+# bindear CDSW_APP_PORT limpio. NO retorna si tiene exito.
+os.execvp(cmd[0], cmd)
