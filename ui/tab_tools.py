@@ -13,18 +13,23 @@ from core.analyzers.delta_analyzer import (
     save_snapshot, list_snapshots, compare_snapshots,
 )
 from core.analyzers.model_manager import ModelManager
+from core.aggregation_suggester import (
+    scan_model, generate_recommendation, get_summary_stats
+)
 
 
 def render_tools_tab(result: AnalysisResult):
     """Render the advanced tools tab."""
 
-    sub = st.tabs(["Delta Analyzer", "Perspectives", "Translations"])
+    sub = st.tabs(["Delta Analyzer", "Aggregation Suggester", "Perspectives", "Translations"])
 
     with sub[0]:
         _render_delta(result)
     with sub[1]:
-        _render_perspectives(result)
+        _render_aggregation_suggester(result)
     with sub[2]:
+        _render_perspectives(result)
+    with sub[3]:
         _render_translations(result)
 
 
@@ -131,6 +136,106 @@ def _render_delta_result(delta):
             for c in changes:
                 icon = {"added": "+", "removed": "-", "modified": "~"}.get(c.change_type, "?")
                 st.caption(f"  [{icon}] {c.name}: {c.detail}")
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  AGGREGATION SUGGESTER
+# ═══════════════════════════════════════════════════════════════════
+
+def _render_aggregation_suggester(result: AnalysisResult):
+    st.markdown("#### Aggregation Table Suggester")
+    st.caption(
+        "Detecta medidas DAX que generan tablas en memoria (SUMMARIZECOLUMNS, ADDCOLUMNS+VALUES, etc.) "
+        "y recomienda convertirlas en tablas de agregación nativas para mejor performance."
+    )
+
+    if not result.model_analysis_available:
+        st.info("⚠️ Requiere modelo semántico disponible (carpeta .SemanticModel).")
+        return
+
+    model_data = result._raw_model_data
+
+    if not model_data:
+        st.warning("No se pudo cargar el modelo semántico.")
+        return
+
+    # Scan model
+    with st.spinner("Escaneando medidas DAX..."):
+        candidates = scan_model(model_data)
+
+    if not candidates:
+        st.success("✅ No se detectaron medidas candidatas para agregación — el modelo está optimizado.")
+        return
+
+    # Summary stats
+    stats = get_summary_stats(candidates)
+    st.markdown("---")
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("Candidatos totales", stats['total'])
+    with c2:
+        st.metric("Alta confianza", stats['by_confidence']['high'])
+    with c3:
+        st.metric("Confianza media", stats['by_confidence']['medium'])
+    with c4:
+        st.metric("Tablas afectadas", stats['affected_tables'])
+
+    # Pattern breakdown
+    st.markdown("**Patrones detectados:**")
+    pattern_labels = {
+        'SUMMARIZECOLUMNS': 'SUMMARIZECOLUMNS',
+        'ADDCOLUMNS+VALUES': 'ADDCOLUMNS(VALUES(...))',
+        'SUMMARIZE': 'SUMMARIZE',
+        'GROUPBY': 'GROUPBY',
+    }
+    cols = st.columns(len(stats['by_pattern']))
+    for i, (pattern, count) in enumerate(stats['by_pattern'].items()):
+        with cols[i]:
+            st.caption(f"{pattern_labels.get(pattern, pattern)}: **{count}**")
+
+    st.markdown("---")
+
+    # Candidates table
+    st.markdown("#### Medidas candidatas")
+
+    conf_icons = {'high': '🔴', 'medium': '🟡', 'low': '🟢'}
+    df = pd.DataFrame([
+        {
+            '': conf_icons[c.confidence],
+            'Medida': c.measure_name,
+            'Tabla': c.table_name,
+            'Patrón': c.pattern,
+            'Confianza': c.confidence.upper(),
+        }
+        for c in candidates
+    ])
+
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    # Details per candidate
+    st.markdown("---")
+    st.markdown("#### Detalle y recomendaciones")
+
+    for i, c in enumerate(candidates[:10]):  # Show first 10
+        icon = conf_icons[c.confidence]
+        with st.expander(f"{icon} {c.measure_name} (Tabla: {c.table_name})"):
+            st.caption(f"**Patrón detectado:** `{c.pattern}`")
+            st.caption(f"**Confianza:** {c.confidence.upper()}")
+            st.markdown(f"**Razón:** {c.reason}")
+
+            st.markdown("**Fragmento DAX:**")
+            st.code(c.match_snippet, language='dax')
+
+            st.markdown("**Expresión completa:**")
+            st.code(c.dax_expression, language='dax')
+
+            # Recommendation
+            rec = generate_recommendation(c)
+            st.markdown(rec)
+
+    if len(candidates) > 10:
+        st.caption(f"Mostrando 10 de {len(candidates)} candidatos. Exportá el análisis completo para ver todos.")
 
 
 # ═══════════════════════════════════════════════════════════════════
