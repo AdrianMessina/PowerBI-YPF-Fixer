@@ -17,6 +17,7 @@ from ui.components import render_header, render_summary_metrics, render_feature_
 from ui.tab_overview import render_overview_tab
 from ui.tab_metrics import render_metrics_tab
 from ui.tab_recommendations import render_recommendations_tab
+from ui.tab_storage_mode import render_storage_mode_tab
 from ui.tab_fixer import render_fixer_tab
 from ui.tab_export import render_export_tab
 from ui.tab_memory import render_memory_tab
@@ -137,18 +138,28 @@ def main():
             logger.log_event("new_analysis_requested", {})
             st.rerun()
 
+        # Badge dinámico en el tab Storage Mode si hay issues críticos
+        dq_critical = sum(
+            1 for i in (getattr(result, "directquery_issues", []) or [])
+            if i.get("severity") == "critical"
+        )
+        storage_tab_label = "🔗 Storage Mode"
+        if dq_critical > 0:
+            storage_tab_label = f"🔗 Storage Mode ({dq_critical}⚠)"
+
         tabs = st.tabs([
-            "Overview", "Metricas", "Recomendaciones",
+            "Overview", "Metricas", "Recomendaciones", storage_tab_label,
             "Auto-Fix", "Memoria", "Herramientas", "Exportar", "Uso",
         ])
 
         with tabs[0]: render_overview_tab(result)
         with tabs[1]: render_metrics_tab(result)
         with tabs[2]: render_recommendations_tab(result)
-        with tabs[3]: render_fixer_tab(result)
-        with tabs[4]: render_memory_tab(result)
-        with tabs[5]: render_tools_tab(result)
-        with tabs[6]: render_export_tab(result)
+        with tabs[3]: render_storage_mode_tab(result)
+        with tabs[4]: render_fixer_tab(result)
+        with tabs[5]: render_memory_tab(result)
+        with tabs[6]: render_tools_tab(result)
+        with tabs[7]: render_export_tab(result)
         with tabs[7]: render_usage_tab()
         return
 
